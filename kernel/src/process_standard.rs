@@ -1071,10 +1071,10 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
 
     fn print_memory_map(&self, writer: &mut dyn Write) {
         // Flash
-        let flash_end = self.flash.as_ptr().wrapping_add(self.flash.len()) as usize;
-        let flash_start = self.flash.as_ptr() as usize;
-        let flash_protected_size = self.header.get_protected_size() as usize;
-        let flash_app_start = flash_start + flash_protected_size;
+        let flash_end = self.flash_end() as usize;
+        let flash_start = self.flash_start() as usize;
+        let flash_app_start = self.flash_non_protected_start() as usize;
+        let flash_protected_size = flash_app_start - flash_start;
         let flash_app_size = flash_end - flash_app_start;
 
         // Grant pointers size.
@@ -1087,17 +1087,17 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         let sram_grant_pointers_start = sram_end - sram_grant_pointers_size;
         let sram_upcall_list_start = sram_grant_pointers_start - Self::CALLBACKS_OFFSET;
         let process_struct_memory_location = sram_upcall_list_start - Self::PROCESS_STRUCT_OFFSET;
-        let sram_grant_start = self.kernel_memory_break.get() as usize;
-        let sram_heap_end = self.app_break.get() as usize;
-        let sram_heap_start: Option<usize> = self.debug.map_or(None, |debug| {
-            debug.app_heap_start_pointer.map(|p| p as usize)
-        });
-        let sram_stack_start: Option<usize> = self.debug.map_or(None, |debug| {
-            debug.app_stack_start_pointer.map(|p| p as usize)
-        });
-        let sram_stack_bottom: Option<usize> = self.debug.map_or(None, |debug| {
-            debug.app_stack_min_pointer.map(|p| p as usize)
-        });
+        let sram_grant_start = self.kernel_memory_break() as usize;
+        let sram_heap_end = self.app_memory_break() as usize;
+        let sram_heap_start: Option<usize> = self
+            .debug_heap_start()
+            .map_or(None, |heap_start| Some(heap_start as usize));
+        let sram_stack_start: Option<usize> = self
+            .debug_stack_start()
+            .map_or(None, |stack_start| Some(stack_start as usize));
+        let sram_stack_bottom: Option<usize> = self
+            .debug_stack_end()
+            .map_or(None, |stack_end| Some(stack_end as usize));
         let sram_start = self.mem_start() as usize;
 
         // SRAM sizes
@@ -1108,18 +1108,18 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
 
         // application statistics
         let events_queued = self.tasks.map_or(0, |tasks| tasks.len());
-        let syscall_count = self.debug.map_or(0, |debug| debug.syscall_count);
+        let syscall_count = self.debug_syscall_count();
         let last_syscall = self.debug.map(|debug| debug.last_syscall);
-        let dropped_upcall_count = self.debug.map_or(0, |debug| debug.dropped_upcall_count);
-        let restart_count = self.restart_count.get();
+        let dropped_upcall_count = self.debug_dropped_upcall_count();
+        let restart_count = self.get_restart_count();
 
         let _ = writer.write_fmt(format_args!(
             "\
              𝐀𝐩𝐩: {}   -   [{:?}]\
              \r\n Events Queued: {}   Syscall Count: {}   Dropped Upcall Count: {}\
              \r\n Restart Count: {}\r\n",
-            self.process_name,
-            self.state.get(),
+            self.get_process_name(),
+            self.get_state(),
             events_queued,
             syscall_count,
             dropped_upcall_count,
