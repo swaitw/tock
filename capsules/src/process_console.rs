@@ -120,6 +120,7 @@ use kernel::debug;
 use kernel::hil::time::{Alarm, AlarmClient};
 use kernel::hil::uart;
 use kernel::introspection::KernelInfo;
+use kernel::process::ProcessPrinter;
 use kernel::ErrorCode;
 use kernel::Kernel;
 
@@ -147,6 +148,7 @@ enum WriterState {
     KernelStack,
     KernelRoData,
     KernelText,
+    ProcessPrint { process_id: ProcessId },
     ProcessStart { process_id: ProcessId },
     ProcessGrant { process_id: ProcessId },
     ProcessHeap { process_id: ProcessId },
@@ -185,6 +187,7 @@ pub struct KernelAddresses {
 pub struct ProcessConsole<'a, A: Alarm<'a>, C: ProcessManagementCapability> {
     uart: &'a dyn uart::UartData<'a>,
     alarm: &'a A,
+    process_printer: &'a dyn ProcessPrinter,
     tx_in_progress: Cell<bool>,
     tx_buffer: TakeCell<'static, [u8]>,
     queue_buffer: TakeCell<'static, [u8]>,
@@ -250,6 +253,7 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
     pub fn new(
         uart: &'a dyn uart::UartData<'a>,
         alarm: &'a A,
+        process_printer: &'a dyn ProcessPrinter,
         tx_buffer: &'static mut [u8],
         rx_buffer: &'static mut [u8],
         queue_buffer: &'static mut [u8],
@@ -261,6 +265,7 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
         ProcessConsole {
             uart: uart,
             alarm: alarm,
+            process_printer,
             tx_in_progress: Cell::new(false),
             tx_buffer: TakeCell::new(tx_buffer),
             queue_buffer: TakeCell::new(queue_buffer),
@@ -330,6 +335,7 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
             WriterState::KernelStack => WriterState::KernelRoData,
             WriterState::KernelRoData => WriterState::KernelText,
             WriterState::KernelText => WriterState::Empty,
+            WriterState::ProcessPrint { process_id } => WriterState::ProcessPrint { process_id },
             WriterState::ProcessStart { process_id } => WriterState::ProcessGrant { process_id },
             WriterState::ProcessGrant { process_id } => {
                 WriterState::ProcessHeapUnused { process_id }
@@ -599,6 +605,22 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
                     ),
                 );
                 let _ = self.write_bytes(&(console_writer.buf)[..console_writer.size]);
+            }
+            WriterState::ProcessPrint { process_id } => {
+                self.kernel
+                    .process_each_capability(&self.capability, |process| {
+                        if process_id == process.processid() {
+                            let mut console_writer = ConsoleWriter::new();
+                            let keep_going =
+                                self.process_printer.print(process, &mut console_writer);
+
+                            let _ = self.write_bytes(&(console_writer.buf)[..console_writer.size]);
+
+                            if !keep_going {
+                                self.writer_state.replace(WriterState::Empty);
+                            }
+                        }
+                    });
             }
             WriterState::ProcessGrant { process_id } => {
                 self.kernel
@@ -971,10 +993,27 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
                                         }
                                         let proc_name = proc.get_process_name();
                                         if proc_name == name {
+                                            let mut console_writer = ConsoleWriter::new();
+                                            let keep_going = self
+                                                .process_printer
+                                                .print(proc, &mut console_writer);
                                             //prints process memory by moving the writer to the start state
-                                            self.write_state(WriterState::ProcessStart {
-                                                process_id: proc.processid(),
-                                            });
+                                            // self.write_state(WriterState::ProcessStart {
+                                            //     process_id: proc.processid(),
+                                            // });
+
+                                            let _ = self.write_bytes(
+                                                &(console_writer.buf)[..console_writer.size],
+                                            );
+
+                                            if keep_going {
+                                                self.writer_state.replace(
+                                                    WriterState::ProcessPrint {
+                                                        process_id: proc.processid(),
+                                                    },
+                                                );
+                                            }
+
                                             found = true;
                                         }
                                     });
