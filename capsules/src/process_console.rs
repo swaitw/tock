@@ -120,7 +120,7 @@ use kernel::debug;
 use kernel::hil::time::{Alarm, AlarmClient};
 use kernel::hil::uart;
 use kernel::introspection::KernelInfo;
-use kernel::process::ProcessPrinter;
+use kernel::process::{ProcessPrinter, ProcessPrinterContext};
 use kernel::ErrorCode;
 use kernel::Kernel;
 
@@ -148,8 +148,14 @@ enum WriterState {
     KernelStack,
     KernelRoData,
     KernelText,
-    ProcessPrint { process_id: ProcessId },
-    List { index: isize, total: isize },
+    ProcessPrint {
+        process_id: ProcessId,
+        context: Option<ProcessPrinterContext>,
+    },
+    List {
+        index: isize,
+        total: isize,
+    },
 }
 
 impl Default for WriterState {
@@ -318,7 +324,13 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
             WriterState::KernelStack => WriterState::KernelRoData,
             WriterState::KernelRoData => WriterState::KernelText,
             WriterState::KernelText => WriterState::Empty,
-            WriterState::ProcessPrint { process_id } => WriterState::ProcessPrint { process_id },
+            WriterState::ProcessPrint {
+                process_id,
+                context,
+            } => WriterState::ProcessPrint {
+                process_id,
+                context,
+            },
             WriterState::List { index, total } => {
                 // Next state just increments index, unless we are at end in
                 // which next state is just the empty state.
@@ -434,17 +446,26 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
                 );
                 let _ = self.write_bytes(&(console_writer.buf)[..console_writer.size]);
             }
-            WriterState::ProcessPrint { process_id } => {
+            WriterState::ProcessPrint {
+                process_id,
+                context,
+            } => {
                 self.kernel
                     .process_each_capability(&self.capability, |process| {
                         if process_id == process.processid() {
                             let mut console_writer = ConsoleWriter::new();
-                            let keep_going =
-                                self.process_printer.print(process, &mut console_writer);
+                            let new_context =
+                                self.process_printer
+                                    .print(process, &mut console_writer, context);
 
                             let _ = self.write_bytes(&(console_writer.buf)[..console_writer.size]);
 
-                            if !keep_going {
+                            if new_context.is_some() {
+                                self.writer_state.replace(WriterState::ProcessPrint {
+                                    process_id: process_id,
+                                    context: new_context,
+                                });
+                            } else {
                                 self.writer_state.replace(WriterState::Empty);
                             }
                         }
@@ -638,18 +659,22 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
                                         let proc_name = proc.get_process_name();
                                         if proc_name == name {
                                             let mut console_writer = ConsoleWriter::new();
-                                            let keep_going = self
-                                                .process_printer
-                                                .print(proc, &mut console_writer);
+                                            let mut context: Option<ProcessPrinterContext> = None;
+                                            context = self.process_printer.print(
+                                                proc,
+                                                &mut console_writer,
+                                                context,
+                                            );
 
                                             let _ = self.write_bytes(
                                                 &(console_writer.buf)[..console_writer.size],
                                             );
 
-                                            if keep_going {
+                                            if context.is_some() {
                                                 self.writer_state.replace(
                                                     WriterState::ProcessPrint {
                                                         process_id: proc.processid(),
+                                                        context: context,
                                                     },
                                                 );
                                             }
