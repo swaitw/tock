@@ -1187,6 +1187,12 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
             }
         });
     }
+
+    fn print_mpu_config(&self, writer: &mut dyn Write) {
+        self.mpu_config.map(|config| {
+            let _ = writer.write_fmt(format_args!("{}", config));
+        });
+    }
 }
 
 impl<C: 'static + Chip> ProcessStandard<'_, C> {

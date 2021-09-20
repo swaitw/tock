@@ -549,6 +549,8 @@ pub trait Process {
     /// context, and the state of the memory protection unit (MPU).
     fn print_full_process(&self, writer: &mut dyn Write);
 
+    fn print_mpu_config(&self, writer: &mut dyn Write);
+
     // debug
 
     /// Returns how many syscalls this app has called.

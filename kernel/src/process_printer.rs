@@ -279,6 +279,8 @@ impl ProcessPrinter for ProcessPrinterText {
             ));
         }
 
+        process.print_mpu_config(&mut bww);
+
         if bww.bytes_remaining() {
             let new_context = ProcessPrinterContext {
                 iteration: bww.get_index(),
