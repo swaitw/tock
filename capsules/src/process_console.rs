@@ -240,12 +240,11 @@ impl fmt::Write for ConsoleWriter {
 }
 
 impl OffsetBinaryWrite for ConsoleWriter {
-    fn write_buffer(&mut self, b: &[u8], offset: usize) -> Result<usize, ()> {
+    fn write_buffer(&mut self, b: &[u8]) -> Result<usize, ()> {
         let start = self.size;
-        let remaining = 500 - start;
-        let to_send = core::cmp::min(b.len() - offset, remaining);
-        // let curr = b.len();
-        self.buf[start..start + to_send].copy_from_slice(&b[offset..offset + to_send]);
+        let remaining = self.buf.len() - start;
+        let to_send = core::cmp::min(b.len(), remaining);
+        self.buf[start..start + to_send].copy_from_slice(&b[..to_send]);
         self.size += to_send;
         Ok(to_send)
     }

@@ -71,7 +71,7 @@ impl<'a> core::fmt::Write for WriteToBinaryWrapper<'a> {
 
             let ret = self
                 .binary_writer
-                .write_buffer(&(s).as_bytes()[start..string_len], 0);
+                .write_buffer(&(s).as_bytes()[start..string_len]);
 
             match ret {
                 Ok(bytes_sent) => {
