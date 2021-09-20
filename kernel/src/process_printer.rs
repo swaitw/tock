@@ -15,6 +15,25 @@ pub struct ProcessPrinterContext {
     iteration: usize,
 }
 
+pub(crate) struct BinaryToWriteWrapper<'a> {
+    writer: &'a mut dyn core::fmt::Write,
+}
+
+impl<'a> BinaryToWriteWrapper<'a> {
+    pub(crate) fn new(writer: &'a mut dyn core::fmt::Write) -> BinaryToWriteWrapper {
+        BinaryToWriteWrapper { writer }
+    }
+}
+
+impl<'a> utilities::offset_binary_write::OffsetBinaryWrite for BinaryToWriteWrapper<'a> {
+    fn write_buffer(&mut self, b: &[u8]) -> Result<usize, ()> {
+        unsafe {
+            let _ = self.writer.write_str(core::str::from_utf8_unchecked(b));
+        }
+        Ok(b.len())
+    }
+}
+
 struct WriteToBinaryWrapper<'a> {
     binary_writer: &'a mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
     index: usize,
