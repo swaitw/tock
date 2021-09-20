@@ -187,18 +187,18 @@ pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
     process_printer.map(|printer| {
         // print data about each process
         let _ = writer.write_fmt(format_args!("\r\n---| App Status |---\r\n"));
-        for idx in 0..procs.len() {
-            procs[idx].map(|process| {
-                let mut context: Option<ProcessPrinterContext> = None;
-                loop {
-                    context = printer.print(process, writer, context);
-                    if context.is_none() {
-                        break;
-                    }
-                }
-                // process.print_full_process(writer);
-            });
-        }
+        // for idx in 0..procs.len() {
+        //     procs[idx].map(|process| {
+        //         let mut context: Option<ProcessPrinterContext> = None;
+        //         loop {
+        //             // context = printer.print(process, writer, context);
+        //             if context.is_none() {
+        //                 break;
+        //             }
+        //         }
+        //         // process.print_full_process(writer);
+        //     });
+        // }
     });
 }
 
