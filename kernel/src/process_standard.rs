@@ -25,6 +25,7 @@ use crate::process_utilities::ProcessLoadError;
 use crate::processbuffer::{ReadOnlyProcessBuffer, ReadWriteProcessBuffer};
 use crate::syscall::{self, Syscall, SyscallReturn, UserspaceKernelBoundary};
 use crate::upcall::UpcallId;
+use crate::utilities;
 use crate::utilities::cells::{MapCell, NumericCellExt};
 
 // The completion code for a process if it faulted.
@@ -1151,10 +1152,10 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
             }
         });
 
-        // Display the current state of the MPU for this process.
-        self.mpu_config.map(|config| {
-            let _ = writer.write_fmt(format_args!("{}", config));
-        });
+        // // Display the current state of the MPU for this process.
+        // self.mpu_config.map(|config| {
+        //     let _ = writer.write_fmt(format_args!("{}", config));
+        // });
 
         // Print a helpful message on how to re-compile a process to view the
         // listing file. If a process is PIC, then we also need to print the
@@ -1188,10 +1189,15 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         });
     }
 
-    fn print_mpu_config(&self, writer: &mut dyn Write) {
-        self.mpu_config.map(|config| {
-            let _ = writer.write_fmt(format_args!("{}", config));
-        });
+    fn print_mpu_config(
+        &self,
+        mpu_config_printer: &dyn crate::platform::mpu::MpuConfigPrinter,
+        writer: &mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
+        context: Option<crate::platform::mpu::MpuConfigPrinterContext>,
+    ) -> Option<crate::platform::mpu::MpuConfigPrinterContext> {
+        self.mpu_config.map_or(None, |config| {
+            mpu_config_printer.print(config, writer, context)
+        })
     }
 }
 

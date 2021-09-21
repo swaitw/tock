@@ -200,6 +200,12 @@ pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
                         break;
                     }
                 }
+                let mpu_config_printer = crate::platform::mpu::MpuConfigPrinterText::new();
+                process.print_mpu_config(
+                    &mpu_config_printer,
+                    &mut crate::process_printer::BinaryToWriteWrapper::new(writer),
+                    None,
+                );
                 // process.print_full_process(writer);
             });
         }

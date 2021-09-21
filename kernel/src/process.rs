@@ -14,6 +14,7 @@ use crate::platform::mpu::{self};
 use crate::processbuffer::{ReadOnlyProcessBuffer, ReadWriteProcessBuffer};
 use crate::syscall::{self, Syscall, SyscallReturn};
 use crate::upcall::UpcallId;
+use crate::utilities;
 
 // Export all process related types via `kernel::process::`.
 pub use crate::process_policies::{
@@ -549,7 +550,16 @@ pub trait Process {
     /// context, and the state of the memory protection unit (MPU).
     fn print_full_process(&self, writer: &mut dyn Write);
 
-    fn print_mpu_config(&self, writer: &mut dyn Write);
+    // fn print_mpu_config(&self, mpu_config_printer: &dyn crate::platform::mpu::MpuConfigPrinter);
+
+    fn print_mpu_config(
+        &self,
+        mpu_config_printer: &dyn crate::platform::mpu::MpuConfigPrinter,
+        writer: &mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
+        context: Option<crate::platform::mpu::MpuConfigPrinterContext>,
+    ) -> Option<crate::platform::mpu::MpuConfigPrinterContext>;
+
+    // fn get_mpu_config(&self) -> Option<&dyn Display>;
 
     // debug
 

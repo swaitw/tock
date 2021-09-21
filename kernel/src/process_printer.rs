@@ -34,7 +34,7 @@ impl<'a> utilities::offset_binary_write::OffsetBinaryWrite for BinaryToWriteWrap
     }
 }
 
-struct WriteToBinaryWrapper<'a> {
+pub(crate) struct WriteToBinaryWrapper<'a> {
     binary_writer: &'a mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
     index: usize,
     offset: usize,
@@ -43,7 +43,7 @@ struct WriteToBinaryWrapper<'a> {
 }
 
 impl<'a> WriteToBinaryWrapper<'a> {
-    fn new(
+    pub(crate) fn new(
         binary_writer: &'a mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
     ) -> WriteToBinaryWrapper {
         WriteToBinaryWrapper {
@@ -55,15 +55,15 @@ impl<'a> WriteToBinaryWrapper<'a> {
         }
     }
 
-    fn set_offset(&mut self, offset: usize) {
+    pub(crate) fn set_offset(&mut self, offset: usize) {
         self.offset = offset;
     }
 
-    fn get_index(&self) -> usize {
+    pub(crate) fn get_index(&self) -> usize {
         self.index
     }
 
-    fn bytes_remaining(&self) -> bool {
+    pub(crate) fn bytes_remaining(&self) -> bool {
         self.bytes_remaining
     }
 }
@@ -298,7 +298,9 @@ impl ProcessPrinter for ProcessPrinterText {
             ));
         }
 
-        process.print_mpu_config(&mut bww);
+        // process.get_mpu_config().map(|config| {
+        //     let _ = bww.write_fmt(format_args!("{}", config));
+        // });
 
         if bww.bytes_remaining() {
             let new_context = ProcessPrinterContext {

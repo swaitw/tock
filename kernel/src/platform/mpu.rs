@@ -1,8 +1,10 @@
 //! Interface for configuring the Memory Protection Unit.
 
-use crate::process::ProcessId;
 use core::cmp;
-use core::fmt::{self, Display};
+use core::fmt::{self, Display, Write};
+
+use crate::process::ProcessId;
+use crate::utilities;
 
 /// User mode access permissions.
 #[derive(Copy, Clone)]
@@ -342,4 +344,50 @@ pub trait KernelMPU {
     /// changes to the kernel regions after this is enabled.
     #[allow(unused_variables)]
     fn enable_kernel_mpu(&self, config: &mut Self::KernelMpuConfig);
+}
+
+pub struct MpuConfigPrinterContext {
+    offset: usize,
+}
+
+pub trait MpuConfigPrinter {
+    fn print(
+        &self,
+        config: &dyn Display,
+        writer: &mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
+        context: Option<MpuConfigPrinterContext>,
+    ) -> Option<MpuConfigPrinterContext>;
+}
+
+pub struct MpuConfigPrinterText {}
+
+impl MpuConfigPrinterText {
+    pub fn new() -> MpuConfigPrinterText {
+        MpuConfigPrinterText {}
+    }
+}
+
+impl MpuConfigPrinter for MpuConfigPrinterText {
+    fn print(
+        &self,
+        config: &dyn Display,
+        writer: &mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
+        context: Option<MpuConfigPrinterContext>,
+    ) -> Option<MpuConfigPrinterContext> {
+        let offset = context.map_or(0, |c| c.offset);
+
+        let mut bww = crate::process_printer::WriteToBinaryWrapper::new(writer);
+        bww.set_offset(offset);
+
+        let _ = bww.write_fmt(format_args!("{}", config));
+
+        if bww.bytes_remaining() {
+            let new_context = MpuConfigPrinterContext {
+                offset: bww.get_index(),
+            };
+            Some(new_context)
+        } else {
+            None
+        }
+    }
 }
