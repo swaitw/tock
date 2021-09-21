@@ -3,7 +3,8 @@
 use core::fmt::Write;
 
 use crate::process::Process;
-use crate::utilities;
+use crate::utilities::binary_write::BinaryWrite;
+use crate::utilities::binary_write::WriteToBinaryOffsetWrapper;
 
 /// A context token that the caller must pass back to us. This allows us to
 /// track where we are in the print operation.
@@ -25,84 +26,12 @@ impl<'a> BinaryToWriteWrapper<'a> {
     }
 }
 
-impl<'a> utilities::offset_binary_write::OffsetBinaryWrite for BinaryToWriteWrapper<'a> {
+impl<'a> BinaryWrite for BinaryToWriteWrapper<'a> {
     fn write_buffer(&mut self, b: &[u8]) -> Result<usize, ()> {
         unsafe {
             let _ = self.writer.write_str(core::str::from_utf8_unchecked(b));
         }
         Ok(b.len())
-    }
-}
-
-struct WriteToBinaryWrapper<'a> {
-    binary_writer: &'a mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
-    index: usize,
-    offset: usize,
-    bytes_remaining: bool,
-}
-
-impl<'a> WriteToBinaryWrapper<'a> {
-    fn new(
-        binary_writer: &'a mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
-    ) -> WriteToBinaryWrapper {
-        WriteToBinaryWrapper {
-            binary_writer,
-            index: 0,
-            offset: 0,
-            bytes_remaining: false,
-        }
-    }
-
-    fn set_offset(&mut self, offset: usize) {
-        self.offset = offset;
-    }
-
-    fn get_index(&self) -> usize {
-        self.index
-    }
-
-    fn bytes_remaining(&self) -> bool {
-        self.bytes_remaining
-    }
-}
-
-impl<'a> core::fmt::Write for WriteToBinaryWrapper<'a> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let string_len = s.len();
-        if self.index + string_len < self.offset {
-            // We are still waiting for `self.offset` bytes to be send before we
-            // actually start printing.
-            self.index += string_len;
-            Ok(())
-        } else {
-            // We need to be printing at least some of this.
-            let start = if self.offset <= self.index {
-                // We're past our offset, so we can display this entire str.
-                0
-            } else {
-                // We want to start in the middle.
-                self.offset - self.index
-            };
-
-            let to_send = string_len - start;
-
-            let ret = self
-                .binary_writer
-                .write_buffer(&(s).as_bytes()[start..string_len]);
-
-            match ret {
-                Ok(bytes_sent) => {
-                    self.index += bytes_sent + start;
-
-                    if to_send > bytes_sent {
-                        self.bytes_remaining = true;
-                    }
-
-                    Ok(())
-                }
-                Err(()) => Err(core::fmt::Error),
-            }
-        }
     }
 }
 
@@ -121,7 +50,7 @@ pub trait ProcessPrinter {
     fn print(
         &self,
         process: &dyn Process,
-        writer: &mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
+        writer: &mut dyn BinaryWrite,
         context: Option<ProcessPrinterContext>,
     ) -> Option<ProcessPrinterContext>;
 }
@@ -139,7 +68,7 @@ impl ProcessPrinter for ProcessPrinterText {
     fn print(
         &self,
         process: &dyn Process,
-        writer: &mut dyn utilities::offset_binary_write::OffsetBinaryWrite,
+        writer: &mut dyn BinaryWrite,
         context: Option<ProcessPrinterContext>,
     ) -> Option<ProcessPrinterContext> {
         let offset = context.map_or(0, |c| c.offset);
@@ -159,7 +88,7 @@ impl ProcessPrinter for ProcessPrinterText {
             - sizes.process_control_block;
         let sram_grant_size = process_struct_memory_location - addresses.sram_grant_start;
 
-        let mut bww = WriteToBinaryWrapper::new(writer);
+        let mut bww = WriteToBinaryOffsetWrapper::new(writer);
         bww.set_offset(offset);
 
         let _ = bww.write_fmt(format_args!(

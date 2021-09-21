@@ -121,7 +121,7 @@ use kernel::hil::time::{Alarm, AlarmClient};
 use kernel::hil::uart;
 use kernel::introspection::KernelInfo;
 use kernel::process::{ProcessPrinter, ProcessPrinterContext};
-use kernel::utilities::offset_binary_write::OffsetBinaryWrite;
+use kernel::utilities::binary_write::BinaryWrite;
 use kernel::ErrorCode;
 use kernel::Kernel;
 
@@ -239,12 +239,12 @@ impl fmt::Write for ConsoleWriter {
     }
 }
 
-impl OffsetBinaryWrite for ConsoleWriter {
-    fn write_buffer(&mut self, b: &[u8]) -> Result<usize, ()> {
+impl BinaryWrite for ConsoleWriter {
+    fn write_buffer(&mut self, buffer: &[u8]) -> Result<usize, ()> {
         let start = self.size;
         let remaining = self.buf.len() - start;
-        let to_send = core::cmp::min(b.len(), remaining);
-        self.buf[start..start + to_send].copy_from_slice(&b[..to_send]);
+        let to_send = core::cmp::min(buffer.len(), remaining);
+        self.buf[start..start + to_send].copy_from_slice(&buffer[..to_send]);
         self.size += to_send;
         Ok(to_send)
     }

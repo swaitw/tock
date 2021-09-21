@@ -59,7 +59,7 @@ use crate::collections::ring_buffer::RingBuffer;
 use crate::hil;
 use crate::platform::chip::Chip;
 use crate::process::Process;
-use crate::process::{ProcessPrinter, ProcessPrinterContext};
+use crate::process::ProcessPrinter;
 use crate::utilities::cells::NumericCellExt;
 use crate::utilities::cells::{MapCell, TakeCell};
 use crate::ErrorCode;
@@ -189,17 +189,16 @@ pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
         let _ = writer.write_fmt(format_args!("\r\n---| App Status |---\r\n"));
         for idx in 0..procs.len() {
             procs[idx].map(|process| {
-                let mut context: Option<ProcessPrinterContext> = None;
-                loop {
-                    context = printer.print(
-                        process,
-                        &mut crate::process_printer::BinaryToWriteWrapper::new(writer),
-                        context,
-                    );
-                    if context.is_none() {
-                        break;
-                    }
-                }
+                // Print the memory map and basic process info.
+                //
+                // Because we are using a synchronous printer we do not need to
+                // worry about looping on the print function.
+                printer.print(
+                    process,
+                    &mut crate::process_printer::BinaryToWriteWrapper::new(writer),
+                    None,
+                );
+                // Print all of the process details.
                 process.print_full_process(writer);
             });
         }

@@ -1,9 +1,9 @@
 //! Utility functions and macros provided by the kernel crate.
 
+pub mod binary_write;
 pub mod helpers;
 pub mod leasable_buffer;
 pub mod math;
-pub mod offset_binary_write;
 pub mod peripheral_management;
 pub mod static_init;
 pub mod storage_volume;
