@@ -136,3 +136,34 @@ impl<'a> core::fmt::Write for WriteToBinaryOffsetWrapper<'a> {
         }
     }
 }
+
+/// Provide a `BinaryWrite` interface on top of a synchronous `core::fmt::Write`
+/// interface.
+///
+/// Note, this MUST only be used to reverse the output of
+/// `WriteToBinaryOffsetWrapper`. That is, this assume that the binary strings
+/// are valid UTF-8, which will be the case if the binary buffer comes from some
+/// `core::fmt::Write` operation originally.
+pub(crate) struct BinaryToWriteWrapper<'a> {
+    writer: &'a mut dyn core::fmt::Write,
+}
+
+impl<'a> BinaryToWriteWrapper<'a> {
+    pub(crate) fn new(writer: &'a mut dyn core::fmt::Write) -> BinaryToWriteWrapper {
+        BinaryToWriteWrapper { writer }
+    }
+}
+
+impl<'a> BinaryWrite for BinaryToWriteWrapper<'a> {
+    fn write_buffer(&mut self, buffer: &[u8]) -> Result<usize, ()> {
+        // Convert the binary string to UTF-8 so we can print it as a string.
+        // This is OK because the buffer MUST have come from a different
+        // `write_str()` operation.
+        unsafe {
+            let _ = self
+                .writer
+                .write_str(core::str::from_utf8_unchecked(buffer));
+        }
+        Ok(buffer.len())
+    }
+}

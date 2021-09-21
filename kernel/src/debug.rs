@@ -60,6 +60,7 @@ use crate::hil;
 use crate::platform::chip::Chip;
 use crate::process::Process;
 use crate::process::ProcessPrinter;
+use crate::utilities::binary_write::BinaryToWriteWrapper;
 use crate::utilities::cells::NumericCellExt;
 use crate::utilities::cells::{MapCell, TakeCell};
 use crate::ErrorCode;
@@ -193,11 +194,7 @@ pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
                 //
                 // Because we are using a synchronous printer we do not need to
                 // worry about looping on the print function.
-                printer.print(
-                    process,
-                    &mut crate::process_printer::BinaryToWriteWrapper::new(writer),
-                    None,
-                );
+                printer.print(process, &mut BinaryToWriteWrapper::new(writer), None);
                 // Print all of the process details.
                 process.print_full_process(writer);
             });

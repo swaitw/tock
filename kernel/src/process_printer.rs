@@ -16,25 +16,6 @@ pub struct ProcessPrinterContext {
     offset: usize,
 }
 
-pub(crate) struct BinaryToWriteWrapper<'a> {
-    writer: &'a mut dyn core::fmt::Write,
-}
-
-impl<'a> BinaryToWriteWrapper<'a> {
-    pub(crate) fn new(writer: &'a mut dyn core::fmt::Write) -> BinaryToWriteWrapper {
-        BinaryToWriteWrapper { writer }
-    }
-}
-
-impl<'a> BinaryWrite for BinaryToWriteWrapper<'a> {
-    fn write_buffer(&mut self, b: &[u8]) -> Result<usize, ()> {
-        unsafe {
-            let _ = self.writer.write_str(core::str::from_utf8_unchecked(b));
-        }
-        Ok(b.len())
-    }
-}
-
 /// Trait for creating a custom "process printer" that formats process state in
 /// some sort of presentable format.
 ///
