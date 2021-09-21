@@ -145,7 +145,7 @@ impl ProcessPrinter for ProcessPrinterText {
         let offset = context.map_or(0, |c| c.offset);
 
         // Process statistics
-        let events_queued = 0; //self.tasks.map_or(0, |tasks| tasks.len());
+        let events_queued = process.pending_tasks();
         let syscall_count = process.debug_syscall_count();
         let dropped_upcall_count = process.debug_dropped_upcall_count();
         let restart_count = process.get_restart_count();
@@ -167,7 +167,22 @@ impl ProcessPrinter for ProcessPrinterText {
                  𝐀𝐩𝐩: {}   -   [{:?}]\
                  \r\n Events Queued: {}   Syscall Count: {}   Dropped Upcall Count: {}\
                  \r\n Restart Count: {}\
-                 \r\n\
+                 \r\n",
+            process.get_process_name(),
+            process.get_state(),
+            events_queued,
+            syscall_count,
+            dropped_upcall_count,
+            restart_count,
+        ));
+
+        let _ = match process.debug_syscall_last() {
+            Some(syscall) => bww.write_fmt(format_args!(" Last Syscall: {:?}\r\n", syscall)),
+            None => bww.write_str(" Last Syscall: None\r\n"),
+        };
+
+        let _ = bww.write_fmt(format_args!(
+            "\
                  \r\n\
                  \r\n ╔═══════════╤══════════════════════════════════════════╗\
                  \r\n ║  Address  │ Region Name    Used | Allocated (bytes)  ║\
@@ -180,12 +195,6 @@ impl ProcessPrinter for ProcessPrinterText {
                  \r\n  {:#010X} ┼───────────────────────────────────────────\
                  \r\n             │ Unused\
                  \r\n  {:#010X} ┼───────────────────────────────────────────",
-            process.get_process_name(),
-            process.get_state(),
-            events_queued,
-            syscall_count,
-            dropped_upcall_count,
-            restart_count,
             addresses.sram_end,
             sizes.grant_pointers,
             sizes.upcall_list,
