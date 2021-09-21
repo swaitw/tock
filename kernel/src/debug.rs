@@ -200,7 +200,7 @@ pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
                         break;
                     }
                 }
-                // process.print_full_process(writer);
+                process.print_full_process(writer);
             });
         }
     });
