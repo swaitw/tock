@@ -270,10 +270,8 @@ pub unsafe fn main() {
     );
     DynamicDeferredCall::set_global_instance(dynamic_deferred_caller);
 
-    let process_printer = static_init!(
-        kernel::process::ProcessPrinterText,
-        kernel::process::ProcessPrinterText::new()
-    );
+    let process_printer =
+        components::process_printer::ProcessPrinterTextComponent::new().finalize(());
     PROCESS_PRINTER = Some(process_printer);
 
     // Initialize USART0 for Uart
