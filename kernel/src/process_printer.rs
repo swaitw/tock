@@ -11,8 +11,8 @@ use crate::utilities::binary_write::WriteToBinaryOffsetWrapper;
 #[derive(PartialEq, Eq, Copy, Clone)]
 pub struct ProcessPrinterContext {
     /// The overall print message is broken in to chunks so that it can be fit
-    /// in a small buffer that is called multiple times. This tracks which chunk
-    /// we are in so we can print the next block.
+    /// in a small buffer that is called multiple times. This tracks which byte
+    /// we are at so we can ignore the text before and print the next bytes.
     offset: usize,
 }
 
@@ -28,7 +28,30 @@ pub struct ProcessPrinterContext {
 /// into a human readable format later. Other cases might want to log process
 /// state to nonvolatile storage rather than display it immediately.
 pub trait ProcessPrinter {
-    fn print(
+    /// Print a process overview to the `writer`. As `print_overview()` uses a
+    /// `&dyn Process` to access the process, only state which can be accessed
+    /// via the `Process` trait can be printed.
+    ///
+    /// This is a synchronous function which also supports asynchronous
+    /// operation. This function does not issue a callback, but the return value
+    /// indicates whether the caller should call `print_overview()` again (after
+    /// the underlying write operation finishes). This allows asynchronous
+    /// implementations to still use `print_overview()`, while still supporting
+    /// the panic handler which runs synchronously.
+    ///
+    /// When `print_overview()` is called the first time `None` should be passed
+    /// in for `context`.
+    ///
+    /// ### Return Value
+    ///
+    /// The return indicates whether `print_overview()` has more printing to do
+    /// and should be called again. If `print_overview()` returns `Some()` then
+    /// the caller should call `print_overview()` again (providing the returned
+    /// `ProcessPrinterContext` as the `context` argument) once the `writer` is
+    /// ready to accept more data. If `print_overview()` returns `None`, the
+    /// `writer` indicated it accepted all output and the caller does not need
+    /// to call `print_overview()` again to finish the printing.
+    fn print_overview(
         &self,
         process: &dyn Process,
         writer: &mut dyn BinaryWrite,
@@ -46,7 +69,32 @@ impl ProcessPrinterText {
 }
 
 impl ProcessPrinter for ProcessPrinterText {
-    fn print(
+    // `print_overview()` must be synchronous, but does not assume a synchronous
+    // writer or an infinite (or very large) underlying buffer in the writer. To
+    // do this, this implementation assumes the underlying writer _is_
+    // synchronous. This makes the printing code cleaner, as it does not need to
+    // be broken up into chunks of some length (which would need to match the
+    // underlying buffer length). However, not all writers are synchronous, so
+    // this implementation keeps track of how many bytes were sent on the last
+    // call, and only prints new bytes on the next call. This works by having
+    // the function start from the beginning each time, formats the entire
+    // overview message, and just drops bytes until getting back to where it
+    // left off on the last call.
+    //
+    // ### Assumptions
+    //
+    // This implementation makes two assumptions:
+    // 1. That `print_overview()` is not called in performance-critical code.
+    //    Since each time it formats and "prints" the message starting from the
+    //    beginning, it duplicates a fair bit of formatting work. Since this is
+    //    for debugging, the performance impact of that shouldn't matter.
+    // 2. That `printer_overview()` will be called in a tight loop, and no
+    //    process state will change between calls. That could change the length
+    //    of the printed message, and lead to gaps or parts of the overview
+    //    being duplicated. However, it does not make sense that the kernel
+    //    would want to run the process while it is displaying debugging
+    //    information about it, so this should be a safe assumption.
+    fn print_overview(
         &self,
         process: &dyn Process,
         writer: &mut dyn BinaryWrite,
@@ -115,6 +163,10 @@ impl ProcessPrinter for ProcessPrinterText {
             addresses.sram_app_brk,
         ));
 
+        // We check to see if the underlying writer has more work to do. If it
+        // does, then its buffer is full and any additional writes are just
+        // going to be dropped. So, we skip doing more printing if there are
+        // bytes remaining as a slight performance optimization.
         if !bww.bytes_remaining() {
             match addresses.sram_heap_start {
                 Some(sram_heap_start) => {
@@ -215,6 +267,10 @@ impl ProcessPrinter for ProcessPrinterText {
         }
 
         if bww.bytes_remaining() {
+            // The underlying writer is indicating there are still bytes
+            // remaining to be sent. That means we want to return a context so
+            // the caller knows to call us again and we can keep printing until
+            // we have displayed the entire process overview.
             let new_context = ProcessPrinterContext {
                 offset: bww.get_index(),
             };
@@ -225,6 +281,8 @@ impl ProcessPrinter for ProcessPrinterText {
     }
 }
 
+/// If `size` is greater than `allocated` then it returns a warning string to
+/// help with debugging.
 fn exceeded_check(size: usize, allocated: usize) -> &'static str {
     if size > allocated {
         " EXCEEDED!"
