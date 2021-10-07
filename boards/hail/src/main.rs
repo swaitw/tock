@@ -44,7 +44,7 @@ static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS]
     [None; NUM_PROCS];
 
 static mut CHIP: Option<&'static sam4l::chip::Sam4l<Sam4lDefaultPeripherals>> = None;
-static mut PPRINTER: Option<&'static kernel::process::ProcessPrinterText> = None;
+static mut PROCESS_PRINTER: Option<&'static kernel::process::ProcessPrinterText> = None;
 
 /// Dummy buffer that causes the linker to reserve enough space for the stack.
 #[no_mangle]
@@ -270,11 +270,11 @@ pub unsafe fn main() {
     );
     DynamicDeferredCall::set_global_instance(dynamic_deferred_caller);
 
-    let pprinter = static_init!(
+    let process_printer = static_init!(
         kernel::process::ProcessPrinterText,
         kernel::process::ProcessPrinterText::new()
     );
-    PPRINTER = Some(pprinter);
+    PROCESS_PRINTER = Some(process_printer);
 
     // Initialize USART0 for Uart
     peripherals.usart0.set_mode(sam4l::usart::UsartMode::Uart);
@@ -306,7 +306,7 @@ pub unsafe fn main() {
         board_kernel,
         uart_mux,
         mux_alarm,
-        pprinter,
+        process_printer,
     )
     .finalize(components::process_console_component_helper!(
         sam4l::ast::Ast<'static>
