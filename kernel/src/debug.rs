@@ -194,7 +194,7 @@ pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
                 //
                 // Because we are using a synchronous printer we do not need to
                 // worry about looping on the print function.
-                printer.print(process, &mut BinaryToWriteWrapper::new(writer), None);
+                printer.print_overview(process, &mut BinaryToWriteWrapper::new(writer), None);
                 // Print all of the process details.
                 process.print_full_process(writer);
             });

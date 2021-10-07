@@ -466,9 +466,11 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
                     .process_each_capability(&self.capability, |process| {
                         if process_id == process.processid() {
                             let mut console_writer = ConsoleWriter::new();
-                            let new_context =
-                                self.process_printer
-                                    .print(process, &mut console_writer, context);
+                            let new_context = self.process_printer.print_overview(
+                                process,
+                                &mut console_writer,
+                                context,
+                            );
 
                             let _ = self.write_bytes(&(console_writer.buf)[..console_writer.size]);
 
@@ -672,7 +674,7 @@ impl<'a, A: Alarm<'a>, C: ProcessManagementCapability> ProcessConsole<'a, A, C> 
                                         if proc_name == name {
                                             let mut console_writer = ConsoleWriter::new();
                                             let mut context: Option<ProcessPrinterContext> = None;
-                                            context = self.process_printer.print(
+                                            context = self.process_printer.print_overview(
                                                 proc,
                                                 &mut console_writer,
                                                 context,
