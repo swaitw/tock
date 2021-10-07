@@ -156,14 +156,10 @@ impl<'a> BinaryToWriteWrapper<'a> {
 
 impl<'a> BinaryWrite for BinaryToWriteWrapper<'a> {
     fn write_buffer(&mut self, buffer: &[u8]) -> Result<usize, ()> {
-        // Convert the binary string to UTF-8 so we can print it as a string.
-        // This is OK because the buffer MUST have come from a different
-        // `write_str()` operation.
-        unsafe {
-            let _ = self
-                .writer
-                .write_str(core::str::from_utf8_unchecked(buffer));
-        }
+        // Convert the binary string to UTF-8 so we can print it as a string. If
+        // this is not actually a UTF-8 string, then return Err(()).
+        let s = core::str::from_utf8(buffer).or(Err(()))?;
+        let _ = self.writer.write_str(s);
         Ok(buffer.len())
     }
 }
