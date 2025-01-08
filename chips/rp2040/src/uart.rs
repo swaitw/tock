@@ -1,4 +1,9 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use core::cell::Cell;
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::hil::uart::ReceiveClient;
 use kernel::hil::uart::{
@@ -389,10 +394,12 @@ pub struct Uart<'a> {
     rx_position: Cell<usize>,
     rx_len: Cell<usize>,
     rx_status: Cell<UARTStateRX>,
+
+    deferred_call: DeferredCall,
 }
 
 impl<'a> Uart<'a> {
-    pub const fn new_uart0() -> Self {
+    pub fn new_uart0() -> Self {
         Self {
             registers: UART0_BASE,
             clocks: OptionalCell::empty(),
@@ -409,9 +416,11 @@ impl<'a> Uart<'a> {
             rx_position: Cell::new(0),
             rx_len: Cell::new(0),
             rx_status: Cell::new(UARTStateRX::Idle),
+
+            deferred_call: DeferredCall::new(),
         }
     }
-    pub const fn new_uart1() -> Self {
+    pub fn new_uart1() -> Self {
         Self {
             registers: UART1_BASE,
             clocks: OptionalCell::empty(),
@@ -427,10 +436,12 @@ impl<'a> Uart<'a> {
             rx_position: Cell::new(0),
             rx_len: Cell::new(0),
             rx_status: Cell::new(UARTStateRX::Idle),
+
+            deferred_call: DeferredCall::new(),
         }
     }
 
-    pub fn set_clocks(&self, clocks: &'a clocks::Clocks) {
+    pub(crate) fn set_clocks(&self, clocks: &'a clocks::Clocks) {
         self.clocks.set(clocks);
     }
 
@@ -489,17 +500,6 @@ impl<'a> Uart<'a> {
                             });
                         });
                     }
-                } else if self.tx_status.get() == UARTStateTX::AbortRequested {
-                    self.tx_status.replace(UARTStateTX::Idle);
-                    self.tx_client.map(|client| {
-                        if let Some(buf) = self.tx_buffer.take() {
-                            client.transmitted_buffer(
-                                buf,
-                                self.tx_position.get(),
-                                Err(ErrorCode::CANCEL),
-                            );
-                        }
-                    });
                 }
             }
         }
@@ -536,18 +536,6 @@ impl<'a> Uart<'a> {
                         });
                     }
                 }
-            } else if self.rx_status.get() == UARTStateRX::AbortRequested {
-                self.rx_status.replace(UARTStateRX::Idle);
-                self.rx_client.map(|client| {
-                    if let Some(buf) = self.rx_buffer.take() {
-                        client.received_buffer(
-                            buf,
-                            self.rx_position.get(),
-                            Err(ErrorCode::CANCEL),
-                            hil::uart::Error::Aborted,
-                        );
-                    }
-                });
             }
         }
     }
@@ -564,13 +552,41 @@ impl<'a> Uart<'a> {
     }
 
     pub fn is_configured(&self) -> bool {
-        if self.registers.uartcr.is_set(UARTCR::UARTEN)
+        self.registers.uartcr.is_set(UARTCR::UARTEN)
             && (self.registers.uartcr.is_set(UARTCR::RXE)
                 || self.registers.uartcr.is_set(UARTCR::TXE))
-        {
-            true
-        } else {
-            false
+    }
+}
+
+impl DeferredCallClient for Uart<'_> {
+    fn register(&'static self) {
+        self.deferred_call.register(self)
+    }
+
+    fn handle_deferred_call(&self) {
+        if self.tx_status.get() == UARTStateTX::AbortRequested {
+            // alert client
+            self.tx_client.map(|client| {
+                self.tx_buffer.take().map(|buf| {
+                    client.transmitted_buffer(buf, self.tx_position.get(), Err(ErrorCode::CANCEL));
+                });
+            });
+            self.tx_status.set(UARTStateTX::Idle);
+        }
+
+        if self.rx_status.get() == UARTStateRX::AbortRequested {
+            // alert client
+            self.rx_client.map(|client| {
+                self.rx_buffer.take().map(|buf| {
+                    client.received_buffer(
+                        buf,
+                        self.rx_position.get(),
+                        Err(ErrorCode::CANCEL),
+                        hil::uart::Error::Aborted,
+                    );
+                });
+            });
+            self.rx_status.set(UARTStateRX::Idle);
         }
     }
 }
@@ -693,7 +709,16 @@ impl<'a> Transmit<'a> for Uart<'a> {
     }
 
     fn transmit_abort(&self) -> Result<(), ErrorCode> {
-        Err(ErrorCode::FAIL)
+        if self.tx_status.get() != UARTStateTX::Idle {
+            self.disable_transmit_interrupt();
+            self.tx_status.set(UARTStateTX::AbortRequested);
+
+            self.deferred_call.set();
+
+            Err(ErrorCode::BUSY)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -729,7 +754,11 @@ impl<'a> Receive<'a> for Uart<'a> {
 
     fn receive_abort(&self) -> Result<(), ErrorCode> {
         if self.rx_status.get() != UARTStateRX::Idle {
+            self.disable_receive_interrupt();
             self.rx_status.set(UARTStateRX::AbortRequested);
+
+            self.deferred_call.set();
+
             Err(ErrorCode::BUSY)
         } else {
             Ok(())
