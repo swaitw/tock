@@ -1,5 +1,5 @@
-pub mod mock_udp;
-pub mod mock_udp2;
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
 
-pub use self::mock_udp::MockUDPComponent;
-pub use self::mock_udp2::MockUDPComponent2;
+pub mod mock_udp;

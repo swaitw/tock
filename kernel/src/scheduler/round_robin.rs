@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Round Robin Scheduler for Tock
 //!
 //! This scheduler is specifically a Round Robin Scheduler with Interrupts.
@@ -15,11 +19,12 @@
 //! interrupted.
 
 use core::cell::Cell;
+use core::num::NonZeroU32;
 
 use crate::collections::list::{List, ListLink, ListNode};
-use crate::kernel::{Kernel, StoppedExecutingReason};
 use crate::platform::chip::Chip;
 use crate::process::Process;
+use crate::process::StoppedExecutingReason;
 use crate::scheduler::{Scheduler, SchedulingDecision};
 
 /// A node in the linked list the scheduler uses to track processes
@@ -39,7 +44,7 @@ impl<'a> RoundRobinProcessNode<'a> {
 }
 
 impl<'a> ListNode<'a, RoundRobinProcessNode<'a>> for RoundRobinProcessNode<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, RoundRobinProcessNode> {
+    fn next(&'a self) -> &'a ListLink<'a, RoundRobinProcessNode<'a>> {
         &self.next
     }
 }
@@ -47,6 +52,7 @@ impl<'a> ListNode<'a, RoundRobinProcessNode<'a>> for RoundRobinProcessNode<'a> {
 /// Round Robin Scheduler
 pub struct RoundRobinSched<'a> {
     time_remaining: Cell<u32>,
+    timeslice_length: u32,
     pub processes: List<'a, RoundRobinProcessNode<'a>>,
     last_rescheduled: Cell<bool>,
 }
@@ -55,50 +61,70 @@ impl<'a> RoundRobinSched<'a> {
     /// How long a process can run before being pre-empted
     const DEFAULT_TIMESLICE_US: u32 = 10000;
     pub const fn new() -> RoundRobinSched<'a> {
+        Self::new_with_time(Self::DEFAULT_TIMESLICE_US)
+    }
+
+    pub const fn new_with_time(time_us: u32) -> RoundRobinSched<'a> {
         RoundRobinSched {
-            time_remaining: Cell::new(Self::DEFAULT_TIMESLICE_US),
+            time_remaining: Cell::new(time_us),
+            timeslice_length: time_us,
             processes: List::new(),
             last_rescheduled: Cell::new(false),
         }
     }
 }
 
-impl<'a, C: Chip> Scheduler<C> for RoundRobinSched<'a> {
-    fn next(&self, kernel: &Kernel) -> SchedulingDecision {
-        if kernel.processes_blocked() {
-            // No processes ready
-            SchedulingDecision::TrySleep
-        } else {
-            let mut next = None; // This will be replaced, bc a process is guaranteed
-                                 // to be ready if processes_blocked() is false
+impl<C: Chip> Scheduler<C> for RoundRobinSched<'_> {
+    fn next(&self) -> SchedulingDecision {
+        let mut first_head = None;
+        let mut next = None;
 
-            // Find next ready process. Place any *empty* process slots, or not-ready
-            // processes, at the back of the queue.
-            for node in self.processes.iter() {
-                match node.proc {
-                    Some(proc) => {
-                        if proc.ready() {
-                            next = Some(proc.processid());
-                            break;
-                        }
-                        self.processes.push_tail(self.processes.pop_head().unwrap());
-                    }
-                    None => {
-                        self.processes.push_tail(self.processes.pop_head().unwrap());
+        // Find the first ready process in the queue. Place any *empty* process slots,
+        // or not-ready processes, at the back of the queue.
+        while let Some(node) = self.processes.head() {
+            // Ensure we do not loop forever if all processes are not ready
+            match first_head {
+                None => first_head = Some(node),
+                Some(first_head) => {
+                    // We made a full iteration and nothing was ready. Try to sleep instead
+                    if core::ptr::eq(first_head, node) {
+                        return SchedulingDecision::TrySleep;
                     }
                 }
             }
-            let timeslice = if self.last_rescheduled.get() {
-                self.time_remaining.get()
-            } else {
-                // grant a fresh timeslice
-                self.time_remaining.set(Self::DEFAULT_TIMESLICE_US);
-                Self::DEFAULT_TIMESLICE_US
-            };
-            assert!(timeslice != 0);
-
-            SchedulingDecision::RunProcess((next.unwrap(), Some(timeslice)))
+            match node.proc {
+                Some(proc) => {
+                    if proc.ready() {
+                        next = Some(proc.processid());
+                        break;
+                    }
+                    self.processes.push_tail(self.processes.pop_head().unwrap());
+                }
+                None => {
+                    self.processes.push_tail(self.processes.pop_head().unwrap());
+                }
+            }
         }
+
+        let next = match next {
+            Some(p) => p,
+            None => {
+                // No processes on the system
+                return SchedulingDecision::TrySleep;
+            }
+        };
+
+        let timeslice = if self.last_rescheduled.get() {
+            self.time_remaining.get()
+        } else {
+            // grant a fresh timeslice
+            self.time_remaining.set(self.timeslice_length);
+            self.timeslice_length
+        };
+        // Why should this panic?
+        let non_zero_timeslice = NonZeroU32::new(timeslice).unwrap();
+
+        SchedulingDecision::RunProcess((next, Some(non_zero_timeslice)))
     }
 
     fn result(&self, result: StoppedExecutingReason, execution_time_us: Option<u32>) {

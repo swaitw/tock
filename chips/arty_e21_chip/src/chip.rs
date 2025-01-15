@@ -1,43 +1,53 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use core::fmt::Write;
-use kernel;
 use kernel::debug;
+use kernel::hil::time::Freq32KHz;
 use kernel::platform::chip::InterruptService;
 use kernel::utilities::registers::interfaces::Readable;
-use rv32i;
 
 use crate::clint;
 use crate::interrupts;
-use rv32i::pmp::PMP;
+use rv32i::pmp::{simple::SimplePMP, PMPUserMPU};
 
 extern "C" {
     fn _start_trap();
 }
 
-pub struct ArtyExx<'a, I: InterruptService<()> + 'a> {
-    pmp: PMP<2>,
+pub type ArtyExxClint<'a> = sifive::clint::Clint<'a, Freq32KHz>;
+
+pub struct ArtyExx<'a, I: InterruptService + 'a> {
+    pmp: PMPUserMPU<2, SimplePMP<4>>,
     userspace_kernel_boundary: rv32i::syscall::SysCall,
     clic: rv32i::clic::Clic,
-    machinetimer: &'a sifive::clint::Clint<'a>,
+    machinetimer: &'a ArtyExxClint<'a>,
     interrupt_service: &'a I,
 }
 
 pub struct ArtyExxDefaultPeripherals<'a> {
-    pub machinetimer: sifive::clint::Clint<'a>,
+    pub machinetimer: ArtyExxClint<'a>,
     pub gpio_port: crate::gpio::Port<'a>,
     pub uart0: sifive::uart::Uart<'a>,
 }
 
-impl<'a> ArtyExxDefaultPeripherals<'a> {
+impl ArtyExxDefaultPeripherals<'_> {
     pub fn new() -> Self {
         Self {
-            machinetimer: sifive::clint::Clint::new(&clint::CLINT_BASE),
+            machinetimer: ArtyExxClint::new(&clint::CLINT_BASE),
             gpio_port: crate::gpio::Port::new(),
             uart0: sifive::uart::Uart::new(crate::uart::UART0_BASE, 32_000_000),
         }
     }
+
+    // Resolves any circular dependencies and sets up deferred calls
+    pub fn init(&'static self) {
+        kernel::deferred_call::DeferredCallClient::register(&self.uart0);
+    }
 }
 
-impl<'a> InterruptService<()> for ArtyExxDefaultPeripherals<'a> {
+impl InterruptService for ArtyExxDefaultPeripherals<'_> {
     unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             interrupts::MTIP => self.machinetimer.handle_interrupt(),
@@ -65,24 +75,17 @@ impl<'a> InterruptService<()> for ArtyExxDefaultPeripherals<'a> {
         }
         true
     }
-
-    unsafe fn service_deferred_call(&self, _: ()) -> bool {
-        false
-    }
 }
 
-impl<'a, I: InterruptService<()> + 'a> ArtyExx<'a, I> {
-    pub unsafe fn new(
-        machinetimer: &'a sifive::clint::Clint<'a>,
-        interrupt_service: &'a I,
-    ) -> Self {
+impl<'a, I: InterruptService + 'a> ArtyExx<'a, I> {
+    pub unsafe fn new(machinetimer: &'a ArtyExxClint<'a>, interrupt_service: &'a I) -> Self {
         // Make a bit-vector of all interrupt locations that we actually intend
         // to use on this chip.
         // 0001 1111 1111 1111 1111 0000 0000 1000 0000
         let in_use_interrupts: u64 = 0x1FFFF0080;
 
         Self {
-            pmp: PMP::new(),
+            pmp: PMPUserMPU::new(SimplePMP::new().unwrap()),
             userspace_kernel_boundary: rv32i::syscall::SysCall::new(),
             clic: rv32i::clic::Clic::new(in_use_interrupts),
             machinetimer,
@@ -107,8 +110,9 @@ impl<'a, I: InterruptService<()> + 'a> ArtyExx<'a, I> {
     /// This needs to be chip specific because how the CLIC works is configured
     /// when the trap handler address is specified in mtvec, and that is only
     /// valid for platforms with a CLIC.
-    #[cfg(all(target_arch = "riscv32", target_os = "none"))]
+    #[cfg(any(doc, all(target_arch = "riscv32", target_os = "none")))]
     pub unsafe fn configure_trap_handler(&self) {
+        use core::arch::asm;
         asm!(
             "
             // The csrw instruction writes a Control and Status Register (CSR)
@@ -128,7 +132,7 @@ impl<'a, I: InterruptService<()> + 'a> ArtyExx<'a, I> {
     }
 
     // Mock implementation for tests on Travis-CI.
-    #[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+    #[cfg(not(any(doc, all(target_arch = "riscv32", target_os = "none"))))]
     pub unsafe fn configure_trap_handler(&self) {
         unimplemented!()
     }
@@ -142,8 +146,8 @@ impl<'a, I: InterruptService<()> + 'a> ArtyExx<'a, I> {
     }
 }
 
-impl<'a, I: InterruptService<()> + 'a> kernel::platform::chip::Chip for ArtyExx<'a, I> {
-    type MPU = PMP<2>;
+impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for ArtyExx<'a, I> {
+    type MPU = PMPUserMPU<2, SimplePMP<4>>;
     type UserspaceKernelBoundary = rv32i::syscall::SysCall;
 
     fn mpu(&self) -> &Self::MPU {
@@ -218,6 +222,7 @@ pub extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]
@@ -226,6 +231,6 @@ pub extern "C" fn disable_interrupt_trap_handler(mcause: u32) {
     // bits.
     let interrupt_index = mcause & 0xFF;
     unsafe {
-        rv32i::clic::disable_interrupt(interrupt_index as u32);
+        rv32i::clic::disable_interrupt(interrupt_index);
     }
 }

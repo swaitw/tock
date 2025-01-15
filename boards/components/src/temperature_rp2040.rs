@@ -1,59 +1,73 @@
-use capsules::temperature_rp2040::TemperatureRp2040;
-use capsules::virtual_adc::AdcDevice;
-use core::marker::PhantomData;
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
+//! Component for the RaspberryPI 2040 built-in temperature sensor.
+
+use capsules_core::virtualizers::virtual_adc::AdcDevice;
+use capsules_extra::temperature_rp2040::TemperatureRp2040;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::adc;
 use kernel::hil::adc::AdcChannel;
-use kernel::static_init_half;
 
 #[macro_export]
-macro_rules! temperaturerp2040_adc_component_helper {
-    ($A:ty, $channel:expr, $adc_mux:expr $(,)?) => {{
-        use capsules::temperature_rp2040::TemperatureRp2040;
-        use capsules::virtual_adc::AdcDevice;
-        use core::mem::MaybeUninit;
-        use kernel::hil::adc::Adc;
-        let mut temperature_adc: &'static capsules::virtual_adc::AdcDevice<'static, $A> =
-            components::adc::AdcComponent::new($adc_mux, $channel)
-                .finalize(components::adc_component_helper!($A));
-        static mut temperature: MaybeUninit<TemperatureRp2040<'static>> = MaybeUninit::uninit();
-        (&mut temperature_adc, &mut temperature)
+macro_rules! temperature_rp2040_adc_component_static {
+    ($A:ty $(,)?) => {{
+        let adc_device = components::adc_component_static!($A);
+        let temperature_rp2040 = kernel::static_buf!(
+            capsules_extra::temperature_rp2040::TemperatureRp2040<
+                'static,
+                capsules_core::virtualizers::virtual_adc::AdcDevice<'static, $A>,
+            >
+        );
+
+        (adc_device, temperature_rp2040)
     };};
 }
 
-pub struct TemperatureRp2040Component<A: 'static + adc::Adc> {
-    _select: PhantomData<A>,
+pub type TemperatureRp2040ComponentType<A> =
+    capsules_extra::temperature_rp2040::TemperatureRp2040<'static, A>;
+
+pub struct TemperatureRp2040Component<A: 'static + adc::Adc<'static>> {
+    adc_mux: &'static capsules_core::virtualizers::virtual_adc::MuxAdc<'static, A>,
+    adc_channel: A::Channel,
     slope: f32,
     v_27: f32,
 }
 
-impl<A: 'static + adc::Adc> TemperatureRp2040Component<A> {
-    pub fn new(slope: f32, v_27: f32) -> TemperatureRp2040Component<A> {
+impl<A: 'static + adc::Adc<'static>> TemperatureRp2040Component<A> {
+    pub fn new(
+        adc_mux: &'static capsules_core::virtualizers::virtual_adc::MuxAdc<'static, A>,
+        adc_channel: A::Channel,
+        slope: f32,
+        v_27: f32,
+    ) -> TemperatureRp2040Component<A> {
         TemperatureRp2040Component {
-            _select: PhantomData,
-            slope: slope,
-            v_27: v_27,
+            adc_mux,
+            adc_channel,
+            slope,
+            v_27,
         }
     }
 }
 
-impl<A: 'static + adc::Adc> Component for TemperatureRp2040Component<A> {
+impl<A: 'static + adc::Adc<'static>> Component for TemperatureRp2040Component<A> {
     type StaticInput = (
-        &'static AdcDevice<'static, A>,
-        &'static mut MaybeUninit<TemperatureRp2040<'static>>,
+        &'static mut MaybeUninit<AdcDevice<'static, A>>,
+        &'static mut MaybeUninit<TemperatureRp2040<'static, AdcDevice<'static, A>>>,
     );
-    type Output = &'static TemperatureRp2040<'static>;
+    type Output = &'static TemperatureRp2040<'static, AdcDevice<'static, A>>;
 
-    unsafe fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
-        let temperature_stm = static_init_half!(
-            static_buffer.1,
-            TemperatureRp2040<'static>,
-            TemperatureRp2040::new(static_buffer.0, self.slope, self.v_27)
-        );
+    fn finalize(self, s: Self::StaticInput) -> Self::Output {
+        let adc_device =
+            crate::adc::AdcComponent::new(self.adc_mux, self.adc_channel).finalize(s.0);
 
-        static_buffer.0.set_client(temperature_stm);
+        let temperature_rp2040 =
+            s.1.write(TemperatureRp2040::new(adc_device, self.slope, self.v_27));
 
-        temperature_stm
+        adc_device.set_client(temperature_rp2040);
+
+        temperature_rp2040
     }
 }
