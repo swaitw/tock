@@ -1,10 +1,14 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Non-Volatile Memory Controller
 //!
 //! Used in order read and write to internal flash.
 
 use core::cell::Cell;
 use core::ops::{Index, IndexMut};
-use kernel::deferred_call::DeferredCall;
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
@@ -14,8 +18,6 @@ use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
 use kernel::ErrorCode;
 
-use crate::deferred_call_tasks::DeferredCallTask;
-
 const NVMC_BASE: StaticRef<NvmcRegisters> =
     unsafe { StaticRef::new(0x4001E400 as *const NvmcRegisters) };
 
@@ -24,8 +26,12 @@ struct NvmcRegisters {
     /// Ready flag
     /// Address 0x400 - 0x404
     pub ready: ReadOnly<u32, Ready::Register>,
+    _reserved0: [u32; 4],
+    /// Ready flag
+    /// Address 0x408 - 0x40C
+    pub ready_next: ReadOnly<u32, Ready::Register>,
     /// Reserved
-    _reserved1: [u32; 64],
+    _reserved1: [u32; 59],
     /// Configuration register
     /// Address: 0x504 - 0x508
     pub config: ReadWrite<u32, Configuration::Register>,
@@ -137,11 +143,6 @@ register_bitfields! [u32,
     ]
 ];
 
-/// This mechanism allows us to schedule "interrupts" even if the hardware
-/// does not support them.
-static DEFERRED_CALL: DeferredCall<DeferredCallTask> =
-    unsafe { DeferredCall::new(DeferredCallTask::Nvmc) };
-
 const PAGE_SIZE: usize = 4096;
 
 /// This is a wrapper around a u8 array that is sized to a single page for the
@@ -157,13 +158,11 @@ const PAGE_SIZE: usize = 4096;
 ///
 /// let pagebuffer = unsafe { static_init!(NrfPage, NrfPage::default()) };
 /// ```
-pub struct NrfPage(pub [u8; PAGE_SIZE as usize]);
+pub struct NrfPage(pub [u8; PAGE_SIZE]);
 
 impl Default for NrfPage {
     fn default() -> Self {
-        Self {
-            0: [0; PAGE_SIZE as usize],
-        }
+        Self([0; PAGE_SIZE])
     }
 }
 impl NrfPage {
@@ -206,15 +205,17 @@ pub struct Nvmc {
     client: OptionalCell<&'static dyn hil::flash::Client<Nvmc>>,
     buffer: TakeCell<'static, NrfPage>,
     state: Cell<FlashState>,
+    deferred_call: DeferredCall,
 }
 
 impl Nvmc {
-    pub const fn new() -> Nvmc {
-        Nvmc {
+    pub fn new() -> Self {
+        Self {
             registers: NVMC_BASE,
             client: OptionalCell::empty(),
             buffer: TakeCell::empty(),
             state: Cell::new(FlashState::Ready),
+            deferred_call: DeferredCall::new(),
         }
     }
 
@@ -249,20 +250,20 @@ impl Nvmc {
             FlashState::Read => {
                 self.client.map(|client| {
                     self.buffer.take().map(|buffer| {
-                        client.read_complete(buffer, hil::flash::Error::CommandComplete);
+                        client.read_complete(buffer, Ok(()));
                     });
                 });
             }
             FlashState::Write => {
                 self.client.map(|client| {
                     self.buffer.take().map(|buffer| {
-                        client.write_complete(buffer, hil::flash::Error::CommandComplete);
+                        client.write_complete(buffer, Ok(()));
                     });
                 });
             }
             FlashState::Erase => {
                 self.client.map(|client| {
-                    client.erase_complete(hil::flash::Error::CommandComplete);
+                    client.erase_complete(Ok(()));
                 });
             }
             _ => {}
@@ -304,7 +305,7 @@ impl Nvmc {
         // Mark the need for an interrupt so we can call the read done
         // callback.
         self.state.set(FlashState::Read);
-        DEFERRED_CALL.set();
+        self.deferred_call.set();
 
         Ok(())
     }
@@ -329,6 +330,7 @@ impl Nvmc {
             let address = ((page_number * PAGE_SIZE) + i) as u32;
             let location = unsafe { &*(address as *const VolatileCell<u32>) };
             location.set(word);
+            while !self.registers.ready.is_set(Ready::READY) {}
         }
 
         // Make sure that the NVMC is done. The CPU should be blocked while the
@@ -341,7 +343,7 @@ impl Nvmc {
         // Mark the need for an interrupt so we can call the write done
         // callback.
         self.state.set(FlashState::Write);
-        DEFERRED_CALL.set();
+        self.deferred_call.set();
 
         Ok(())
     }
@@ -353,7 +355,7 @@ impl Nvmc {
         // Mark that we want to trigger a pseudo interrupt so that we can issue
         // the callback even though the NVMC is completely blocking.
         self.state.set(FlashState::Erase);
-        DEFERRED_CALL.set();
+        self.deferred_call.set();
 
         Ok(())
     }
@@ -386,5 +388,15 @@ impl hil::flash::Flash for Nvmc {
 
     fn erase_page(&self, page_number: usize) -> Result<(), ErrorCode> {
         self.erase_page(page_number)
+    }
+}
+
+impl DeferredCallClient for Nvmc {
+    fn handle_deferred_call(&self) {
+        self.handle_interrupt();
+    }
+
+    fn register(&'static self) {
+        self.deferred_call.register(self);
     }
 }

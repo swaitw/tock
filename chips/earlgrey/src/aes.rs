@@ -1,11 +1,14 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Support for the AES hardware block on OpenTitan
 //!
 //! <https://docs.opentitan.org/hw/ip/aes/doc/>
 
+use crate::registers::top_earlgrey::AES_BASE_ADDR;
 use core::cell::Cell;
-use kernel::dynamic_deferred_call::{
-    DeferredCallHandle, DynamicDeferredCall, DynamicDeferredCallClient,
-};
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::hil::symmetric_encryption;
 use kernel::hil::symmetric_encryption::{AES128_BLOCK_SIZE, AES128_KEY_SIZE};
@@ -51,9 +54,11 @@ register_structs! {
         (0x6C => data_out2: ReadOnly<u32>),
         (0x70 => data_out3: ReadOnly<u32>),
         (0x74 => ctrl: ReadWrite<u32, CTRL::Register>),
-        (0x78 => trigger: WriteOnly<u32, TRIGGER::Register>),
-        (0x7C => status: ReadOnly<u32, STATUS::Register>),
-        (0x80 => @END),
+        (0x78 => ctrl_aux: ReadWrite<u32>),
+        (0x7C => ctrl_aux_regwen: ReadWrite<u32>),
+        (0x80 => trigger: WriteOnly<u32, TRIGGER::Register>),
+        (0x84 => status: ReadOnly<u32, STATUS::Register>),
+        (0x88 => @END),
     }
 }
 
@@ -63,11 +68,11 @@ register_bitfields![u32,
         FATAL_FAULT OFFSET(1) NUMBITS(1) [],
     ],
     CTRL [
-        OPERATION OFFSET(0) NUMBITS(1) [
-            Encrypting = 0,
-            Decrypting = 1,
+        OPERATION OFFSET(0) NUMBITS(2) [
+            Encrypting = 1,
+            Decrypting = 2,
         ],
-        MODE OFFSET(1) NUMBITS(6) [
+        MODE OFFSET(2) NUMBITS(6) [
             AES_ECB = 1,
             AES_CBC = 2,
             AES_CFB = 4,
@@ -75,13 +80,13 @@ register_bitfields![u32,
             AES_CTR = 16,
             AES_NONE = 32,
         ],
-        KEY_LEN OFFSET(7) NUMBITS(3) [
+        KEY_LEN OFFSET(8) NUMBITS(3) [
             Key128 = 1,
             Key192 = 2,
             Key256 = 4,
         ],
-        MANUAL_OPERATION OFFSET(10) NUMBITS(1) [],
-        FORCE_ZERO_MASKS OFFSET(11) NUMBITS(1) [],
+        MANUAL_OPERATION OFFSET(15) NUMBITS(1) [],
+        FORCE_ZERO_MASKS OFFSET(16) NUMBITS(1) [],
     ],
     TRIGGER [
         START OFFSET(0) NUMBITS(1) [],
@@ -110,7 +115,7 @@ enum Mode {
 
 // https://docs.opentitan.org/hw/top_earlgrey/doc/
 const AES_BASE: StaticRef<AesRegisters> =
-    unsafe { StaticRef::new(0x4110_0000 as *const AesRegisters) };
+    unsafe { StaticRef::new(AES_BASE_ADDR as *const AesRegisters) };
 
 pub struct Aes<'a> {
     registers: StaticRef<AesRegisters>,
@@ -120,31 +125,42 @@ pub struct Aes<'a> {
     dest: TakeCell<'static, [u8]>,
     mode: Cell<Mode>,
 
-    deferred_call: Cell<bool>,
-    deferred_caller: &'static DynamicDeferredCall,
-    deferred_handle: OptionalCell<DeferredCallHandle>,
+    deferred_call: DeferredCall,
 }
 
 impl<'a> Aes<'a> {
-    pub const fn new(deferred_caller: &'static DynamicDeferredCall) -> Aes<'a> {
+    pub fn new() -> Aes<'a> {
         Aes {
             registers: AES_BASE,
             client: OptionalCell::empty(),
             source: TakeCell::empty(),
             dest: TakeCell::empty(),
             mode: Cell::new(Mode::IDLE),
-            deferred_call: Cell::new(false),
-            deferred_caller,
-            deferred_handle: OptionalCell::empty(),
+            deferred_call: DeferredCall::new(),
         }
     }
 
-    pub fn initialise(&self, deferred_call_handle: DeferredCallHandle) {
-        self.deferred_handle.set(deferred_call_handle);
+    pub fn idle(&self) -> bool {
+        self.registers.status.is_set(STATUS::IDLE)
     }
 
-    fn idle(&self) -> bool {
-        self.registers.status.is_set(STATUS::IDLE)
+    /// Must wait for IDLE, for trigger to set.
+    /// On reset, AES unit will first reseed the internal PRNGs
+    /// for register clearing and masking via EDN, and then
+    /// clear all key, IV and data registers with pseudo-random data.
+    /// Only after this sequence has finished, the unit becomes idle
+    ///
+    /// NOTE: This is needed for Verilator, and is suggested by documentation
+    ///       in general.
+    /// Refer: <https://docs.opentitan.org/hw/ip/aes/doc/#programmers-guide>
+    fn wait_on_idle_ready(&self) -> Result<(), ErrorCode> {
+        for _i in 0..10000 {
+            if self.idle() {
+                return Ok(());
+            }
+        }
+        // AES Busy
+        Err(ErrorCode::BUSY)
     }
 
     fn input_ready(&self) -> bool {
@@ -264,7 +280,7 @@ impl<'a> Aes<'a> {
 
             self.wait_for_output_valid()?;
             self.read_block(i)?;
-            write_block = write_block + AES128_BLOCK_SIZE;
+            write_block += AES128_BLOCK_SIZE;
         }
 
         Ok(())
@@ -293,9 +309,7 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
     }
 
     fn set_iv(&self, iv: &[u8]) -> Result<(), ErrorCode> {
-        if !self.idle() {
-            return Err(ErrorCode::BUSY);
-        }
+        self.wait_on_idle_ready()?;
 
         if iv.len() != AES128_BLOCK_SIZE {
             return Err(ErrorCode::INVAL);
@@ -321,9 +335,7 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
     }
 
     fn set_key(&self, key: &[u8]) -> Result<(), ErrorCode> {
-        if !self.idle() {
-            return Err(ErrorCode::BUSY);
-        }
+        self.wait_on_idle_ready()?;
 
         if key.len() != AES128_KEY_SIZE {
             return Err(ErrorCode::INVAL);
@@ -397,7 +409,7 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
             }
         }
 
-        if self.deferred_call.get() {
+        if self.deferred_call.is_pending() {
             return Some((
                 Err(ErrorCode::BUSY),
                 self.source.take(),
@@ -405,23 +417,18 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
             ));
         }
 
-        let ret;
         self.dest.replace(dest);
-        match source {
-            None => {
-                ret = self.do_crypt(start_index, stop_index, start_index);
-            }
+        let ret = match source {
+            None => self.do_crypt(start_index, stop_index, start_index),
             Some(src) => {
                 self.source.replace(src);
-                ret = self.do_crypt(start_index, stop_index, 0);
+                self.do_crypt(start_index, stop_index, 0)
             }
-        }
+        };
 
         if ret.is_ok() {
             // Schedule a deferred call
-            self.deferred_call.set(true);
-            self.deferred_handle
-                .map(|handle| self.deferred_caller.set(*handle));
+            self.deferred_call.set();
             None
         } else {
             Some((ret, self.source.take(), self.dest.take().unwrap()))
@@ -431,10 +438,7 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
 
 impl kernel::hil::symmetric_encryption::AES128Ctr for Aes<'_> {
     fn set_mode_aes128ctr(&self, encrypting: bool) -> Result<(), ErrorCode> {
-        if !self.idle() {
-            return Err(ErrorCode::BUSY);
-        }
-
+        self.wait_on_idle_ready()?;
         self.mode.set(Mode::AES128CTR);
 
         let mut ctrl = if encrypting {
@@ -457,10 +461,7 @@ impl kernel::hil::symmetric_encryption::AES128Ctr for Aes<'_> {
 
 impl kernel::hil::symmetric_encryption::AES128ECB for Aes<'_> {
     fn set_mode_aes128ecb(&self, encrypting: bool) -> Result<(), ErrorCode> {
-        if !self.idle() {
-            return Err(ErrorCode::BUSY);
-        }
-
+        self.wait_on_idle_ready()?;
         self.mode.set(Mode::AES128ECB);
 
         let mut ctrl = if encrypting {
@@ -483,10 +484,7 @@ impl kernel::hil::symmetric_encryption::AES128ECB for Aes<'_> {
 
 impl kernel::hil::symmetric_encryption::AES128CBC for Aes<'_> {
     fn set_mode_aes128cbc(&self, encrypting: bool) -> Result<(), ErrorCode> {
-        if !self.idle() {
-            return Err(ErrorCode::BUSY);
-        }
-
+        self.wait_on_idle_ready()?;
         self.mode.set(Mode::AES128CBC);
 
         let mut ctrl = if encrypting {
@@ -507,15 +505,14 @@ impl kernel::hil::symmetric_encryption::AES128CBC for Aes<'_> {
     }
 }
 
-impl<'a> DynamicDeferredCallClient for Aes<'_> {
-    fn call(&self, _handle: DeferredCallHandle) {
-        // Are we currently in a TX or RX transaction?
-        if self.deferred_call.get() {
-            self.deferred_call.set(false);
+impl DeferredCallClient for Aes<'_> {
+    fn register(&'static self) {
+        self.deferred_call.register(self);
+    }
 
-            self.client.map(|client| {
-                client.crypt_done(self.source.take(), self.dest.take().unwrap());
-            });
-        }
+    fn handle_deferred_call(&self) {
+        self.client.map(|client| {
+            client.crypt_done(self.source.take(), self.dest.take().unwrap());
+        });
     }
 }

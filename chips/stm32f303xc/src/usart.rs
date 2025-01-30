@@ -1,5 +1,10 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 // use core::cell::Cell;
 use core::cell::Cell;
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::platform::chip::ClockInterface;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
@@ -305,13 +310,15 @@ pub struct Usart<'a> {
     rx_position: Cell<usize>,
     rx_len: Cell<usize>,
     rx_status: Cell<USARTStateRX>,
+
+    deferred_call: DeferredCall,
 }
 
 impl<'a> Usart<'a> {
-    const fn new(base_addr: StaticRef<UsartRegisters>, clock: UsartClock<'a>) -> Self {
+    fn new(base_addr: StaticRef<UsartRegisters>, clock: UsartClock<'a>) -> Self {
         Self {
             registers: base_addr,
-            clock: clock,
+            clock,
 
             tx_client: OptionalCell::empty(),
             rx_client: OptionalCell::empty(),
@@ -325,10 +332,12 @@ impl<'a> Usart<'a> {
             rx_position: Cell::new(0),
             rx_len: Cell::new(0),
             rx_status: Cell::new(USARTStateRX::Idle),
+
+            deferred_call: DeferredCall::new(),
         }
     }
 
-    pub const fn new_usart1(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_usart1(rcc: &'a rcc::Rcc) -> Self {
         Self::new(
             USART1_BASE,
             UsartClock(rcc::PeripheralClock::new(
@@ -338,7 +347,7 @@ impl<'a> Usart<'a> {
         )
     }
 
-    pub const fn new_usart2(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_usart2(rcc: &'a rcc::Rcc) -> Self {
         Self::new(
             USART2_BASE,
             UsartClock(rcc::PeripheralClock::new(
@@ -348,7 +357,7 @@ impl<'a> Usart<'a> {
         )
     }
 
-    pub const fn new_usart3(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_usart3(rcc: &'a rcc::Rcc) -> Self {
         Self::new(
             USART3_BASE,
             UsartClock(rcc::PeripheralClock::new(
@@ -423,17 +432,6 @@ impl<'a> Usart<'a> {
                         }
                     });
                 }
-            } else if self.tx_status.get() == USARTStateTX::AbortRequested {
-                self.tx_status.replace(USARTStateTX::Idle);
-                self.tx_client.map(|client| {
-                    if let Some(buf) = self.tx_buffer.take() {
-                        client.transmitted_buffer(
-                            buf,
-                            self.tx_position.get(),
-                            Err(ErrorCode::CANCEL),
-                        );
-                    }
-                });
             }
         }
 
@@ -468,18 +466,6 @@ impl<'a> Usart<'a> {
                         }
                     });
                 }
-            } else if self.rx_status.get() == USARTStateRX::AbortRequested {
-                self.rx_status.replace(USARTStateRX::Idle);
-                self.rx_client.map(|client| {
-                    if let Some(buf) = self.rx_buffer.take() {
-                        client.received_buffer(
-                            buf,
-                            self.rx_position.get(),
-                            Err(ErrorCode::CANCEL),
-                            hil::uart::Error::Aborted,
-                        );
-                    }
-                });
             }
         }
 
@@ -496,6 +482,39 @@ impl<'a> Usart<'a> {
                     );
                 }
             });
+        }
+    }
+}
+
+impl DeferredCallClient for Usart<'_> {
+    fn register(&'static self) {
+        self.deferred_call.register(self);
+    }
+
+    fn handle_deferred_call(&self) {
+        if self.tx_status.get() == USARTStateTX::AbortRequested {
+            // alert client
+            self.tx_client.map(|client| {
+                self.tx_buffer.take().map(|buf| {
+                    client.transmitted_buffer(buf, self.tx_position.get(), Err(ErrorCode::CANCEL));
+                });
+            });
+            self.tx_status.set(USARTStateTX::Idle);
+        }
+
+        if self.rx_status.get() == USARTStateRX::AbortRequested {
+            // alert client
+            self.rx_client.map(|client| {
+                self.rx_buffer.take().map(|buf| {
+                    client.received_buffer(
+                        buf,
+                        self.rx_position.get(),
+                        Err(ErrorCode::CANCEL),
+                        hil::uart::Error::Aborted,
+                    );
+                });
+            });
+            self.rx_status.set(USARTStateRX::Idle);
         }
     }
 }
@@ -532,7 +551,11 @@ impl<'a> hil::uart::Transmit<'a> for Usart<'a> {
 
     fn transmit_abort(&self) -> Result<(), ErrorCode> {
         if self.tx_status.get() != USARTStateTX::Idle {
+            self.disable_transmit_interrupt();
             self.tx_status.set(USARTStateTX::AbortRequested);
+
+            self.deferred_call.set();
+
             Err(ErrorCode::BUSY)
         } else {
             Ok(())
@@ -545,7 +568,7 @@ impl hil::uart::Configure for Usart<'_> {
         if params.baud_rate != 115200
             || params.stop_bits != hil::uart::StopBits::One
             || params.parity != hil::uart::Parity::None
-            || params.hw_flow_control != false
+            || params.hw_flow_control
             || params.width != hil::uart::Width::Eight
         {
             panic!(
@@ -558,7 +581,7 @@ impl hil::uart::Configure for Usart<'_> {
         self.registers.cr1.modify(CR1::M1::CLEAR);
 
         // Set the stop bit length - 00: 1 Stop bits
-        self.registers.cr2.modify(CR2::STOP.val(0b00 as u32));
+        self.registers.cr2.modify(CR2::STOP.val(0b00_u32));
 
         // Set no parity
         self.registers.cr1.modify(CR1::PCE::CLEAR);
@@ -568,8 +591,8 @@ impl hil::uart::Configure for Usart<'_> {
         // to Table 159 of reference manual, the value for BRR is 69.444 (0x45)
         // DIV_Fraction = 0x5
         // DIV_Mantissa = 0x4
-        self.registers.brr.modify(BRR::DIV_Fraction.val(0x5 as u32));
-        self.registers.brr.modify(BRR::DIV_Mantissa.val(0x4 as u32));
+        self.registers.brr.modify(BRR::DIV_Fraction.val(0x5_u32));
+        self.registers.brr.modify(BRR::DIV_Mantissa.val(0x4_u32));
 
         // Enable transmit block
         self.registers.cr1.modify(CR1::TE::SET);
@@ -616,7 +639,11 @@ impl<'a> hil::uart::Receive<'a> for Usart<'a> {
 
     fn receive_abort(&self) -> Result<(), ErrorCode> {
         if self.rx_status.get() != USARTStateRX::Idle {
+            self.disable_receive_interrupt();
             self.rx_status.set(USARTStateRX::AbortRequested);
+
+            self.deferred_call.set();
+
             Err(ErrorCode::BUSY)
         } else {
             Ok(())

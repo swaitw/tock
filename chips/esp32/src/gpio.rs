@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! GPIO driver.
 
 use core::ops::{Index, IndexMut};
@@ -119,7 +123,12 @@ register_bitfields![u32,
 register_bitfields![u32,
     IO_MUX_GPIO [
         FILTER_EN OFFSET(15) NUMBITS(1) [],
-        MCU_SEL OFFSET(12) NUMBITS(3) [],
+        MCU_SEL OFFSET(12) NUMBITS(3) [
+            FUN_0 = 0,
+            FUN_1 = 1,
+            FUN_2 = 2,
+            FUN_3 = 3
+        ],
         FUN_IE OFFSET(9) NUMBITS(1) [],
         FUN_WPU OFFSET(8) NUMBITS(1) [],
         FUN_WPD OFFSET(7) NUMBITS(1) [],
@@ -211,6 +220,12 @@ impl gpio::Configure for GpioPin<'_> {
     }
 
     fn make_output(&self) -> gpio::Configuration {
+        // Setting peripheral index 128 causes GPIO_OUT_REG and GPIO_ENABLE_REG to enable for the given pin
+        self.registers.func_out_sel_cfg[self.pin.shift].set(0x80);
+
+        // IO Mux function 1 on all pins is GPIO, no alternate peripherals (see table 5-2 in ESP32 datasheet)
+        self.iomux_registers.gpio[self.pin.shift].modify(IO_MUX_GPIO::MCU_SEL::FUN_1);
+
         self.registers
             .enable_w1ts
             .set(self.pin.mask << self.pin.shift);
@@ -229,7 +244,7 @@ impl gpio::Configure for GpioPin<'_> {
     }
 
     fn disable_input(&self) -> gpio::Configuration {
-        /* We can't do this from the GPIO contorller.
+        /* We can't do this from the GPIO controller.
          * It does look like the IO Mux is capable of this
          * though.
          */
@@ -313,7 +328,7 @@ pub struct Port<'a> {
     pins: [GpioPin<'a>; 17],
 }
 
-impl<'a> Port<'a> {
+impl Port<'_> {
     pub const fn new() -> Self {
         Self {
             pins: [

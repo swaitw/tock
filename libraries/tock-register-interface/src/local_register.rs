@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Module containing the [`LocalRegisterCopy`] type. Please refer to
 //! its documentation.
 
@@ -36,7 +40,7 @@ pub struct LocalRegisterCopy<T: UIntLike, R: RegisterLongName = ()> {
 impl<T: UIntLike, R: RegisterLongName> LocalRegisterCopy<T, R> {
     pub const fn new(value: T) -> Self {
         LocalRegisterCopy {
-            value: value,
+            value,
             associated_register: PhantomData,
         }
     }
@@ -83,10 +87,10 @@ impl<T: UIntLike, R: RegisterLongName> LocalRegisterCopy<T, R> {
         field.is_set(self.get())
     }
 
-    /// Check if any specified parts of a field match
+    /// Check if any bits corresponding to the mask in the passed `FieldValue` are set.
     #[inline]
-    pub fn matches_any(&self, field: FieldValue<T, R>) -> bool {
-        field.matches_any(self.get())
+    pub fn any_matching_bits_set(&self, field: FieldValue<T, R>) -> bool {
+        field.any_matching_bits_set(self.get())
     }
 
     /// Check if all specified parts of a field match
@@ -95,11 +99,32 @@ impl<T: UIntLike, R: RegisterLongName> LocalRegisterCopy<T, R> {
         field.matches_all(self.get())
     }
 
+    /// Check if any of the passed parts of a field exactly match the contained
+    /// value. This allows for matching on unset bits, or matching on specific values
+    /// in multi-bit fields.
+    #[inline]
+    pub fn matches_any(&self, fields: &[FieldValue<T, R>]) -> bool {
+        fields
+            .iter()
+            .any(|field| self.get() & field.mask() == field.value)
+    }
+
     /// Do a bitwise AND operation of the stored value and the passed in value
     /// and return a new LocalRegisterCopy.
     #[inline]
     pub fn bitand(&self, rhs: T) -> LocalRegisterCopy<T, R> {
         LocalRegisterCopy::new(self.value & rhs)
+    }
+
+    #[inline]
+    pub fn debug(&self) -> crate::debug::RegisterDebugValue<T, R>
+    where
+        R: crate::debug::RegisterDebugInfo<T>,
+    {
+        crate::debug::RegisterDebugValue {
+            data: self.get(),
+            _reg: core::marker::PhantomData,
+        }
     }
 }
 
