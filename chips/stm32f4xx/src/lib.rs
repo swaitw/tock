@@ -1,22 +1,27 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Peripheral implementations for the STM32F4xx MCU.
 //!
 //! STM32F446RE: <https://www.st.com/en/microcontrollers/stm32f4.html>
 
 #![crate_name = "stm32f4xx"]
 #![crate_type = "rlib"]
-#![feature(const_fn_trait_bound)]
-#![feature(asm)]
 #![no_std]
 
 pub mod chip;
+pub mod chip_specific;
 pub mod nvic;
 
 // Peripherals
 pub mod adc;
+pub mod can;
+pub mod dac;
 pub mod dbg;
-pub mod deferred_calls;
-pub mod dma1;
+pub mod dma;
 pub mod exti;
+pub mod flash;
 pub mod fsmc;
 pub mod gpio;
 pub mod i2c;
@@ -27,10 +32,10 @@ pub mod tim2;
 pub mod trng;
 pub mod usart;
 
-use cortexm4::{
-    hard_fault_handler, initialize_ram_jump_to_main, svc_handler, systick_handler,
-    unhandled_interrupt,
-};
+// Clocks
+pub mod clocks;
+
+use cortexm4f::{initialize_ram_jump_to_main, unhandled_interrupt, CortexM4F, CortexMVariant};
 
 extern "C" {
     // _estack is not really a function, but it makes the types work
@@ -47,24 +52,24 @@ extern "C" {
 pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     _estack,
     initialize_ram_jump_to_main,
-    unhandled_interrupt, // NMI
-    hard_fault_handler,  // Hard Fault
-    unhandled_interrupt, // MemManage
-    unhandled_interrupt, // BusFault
-    unhandled_interrupt, // UsageFault
+    unhandled_interrupt,           // NMI
+    CortexM4F::HARD_FAULT_HANDLER, // Hard Fault
+    unhandled_interrupt,           // MemManage
+    unhandled_interrupt,           // BusFault
+    unhandled_interrupt,           // UsageFault
     unhandled_interrupt,
     unhandled_interrupt,
     unhandled_interrupt,
     unhandled_interrupt,
-    svc_handler,         // SVC
-    unhandled_interrupt, // DebugMon
+    CortexM4F::SVC_HANDLER, // SVC
+    unhandled_interrupt,    // DebugMon
     unhandled_interrupt,
-    unhandled_interrupt, // PendSV
-    systick_handler,     // SysTick
+    unhandled_interrupt,        // PendSV
+    CortexM4F::SYSTICK_HANDLER, // SysTick
 ];
 
 pub unsafe fn init() {
-    cortexm4::nvic::disable_all();
-    cortexm4::nvic::clear_all_pending();
-    cortexm4::nvic::enable_all();
+    cortexm4f::nvic::disable_all();
+    cortexm4f::nvic::clear_all_pending();
+    cortexm4f::nvic::enable_all();
 }

@@ -1,12 +1,14 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Implementations for generic LowRISC peripherals.
 
-#![feature(const_fn_trait_bound)]
-// Feature required with newer versions of rustc (at least 2020-10-25).
-#![feature(const_mut_refs)]
 #![no_std]
 #![crate_name = "lowrisc"]
 #![crate_type = "rlib"]
 
+pub mod aon_timer;
 pub mod csrng;
 pub mod flash_ctrl;
 pub mod gpio;
@@ -15,6 +17,9 @@ pub mod i2c;
 pub mod otbn;
 pub mod padctrl;
 pub mod pwrmgr;
+pub mod registers;
+pub mod rsa;
+pub mod spi_host;
 pub mod uart;
 pub mod usbdev;
 pub mod virtual_otbn;
