@@ -1,40 +1,38 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Component for 9DOF
 //!
 //! Usage
 //! -----
-//! NineDof
 //!
 //! ```rust
 //! let ninedof = components::ninedof::NineDofComponent::new(board_kernel)
-//!     .finalize(components::ninedof_component_helper!(driver1, driver2, ...));
+//!     .finalize(components::ninedof_component_static!(driver1, driver2, ...));
 //! ```
 
-use capsules::ninedof::NineDof;
+use capsules_extra::ninedof::NineDof;
 use core::mem::MaybeUninit;
 use kernel::capabilities;
 use kernel::component::Component;
 use kernel::create_capability;
-use kernel::static_init_half;
 
 #[macro_export]
-macro_rules! ninedof_component_helper {
+macro_rules! ninedof_component_static {
     ($($P:expr),+ $(,)?) => {{
-        use capsules::ninedof::NineDof;
-        use core::mem::MaybeUninit;
-        use kernel::hil;
         use kernel::count_expressions;
-        use kernel::static_init;
+
         const NUM_DRIVERS: usize = count_expressions!($($P),+);
 
-        let drivers = static_init!(
+        let drivers = kernel::static_init!(
             [&'static dyn kernel::hil::sensors::NineDof; NUM_DRIVERS],
             [
                 $($P,)*
             ]
         );
-        static mut BUF: MaybeUninit<NineDof<'static>> =
-            MaybeUninit::uninit();
-        (&mut BUF, drivers)
+        let ninedof = kernel::static_buf!(capsules_extra::ninedof::NineDof<'static>);
+        (ninedof, drivers)
     };};
 }
 
@@ -46,8 +44,8 @@ pub struct NineDofComponent {
 impl NineDofComponent {
     pub fn new(board_kernel: &'static kernel::Kernel, driver_num: usize) -> NineDofComponent {
         NineDofComponent {
-            board_kernel: board_kernel,
-            driver_num: driver_num,
+            board_kernel,
+            driver_num,
         }
     }
 }
@@ -57,17 +55,16 @@ impl Component for NineDofComponent {
         &'static mut MaybeUninit<NineDof<'static>>,
         &'static [&'static dyn kernel::hil::sensors::NineDof<'static>],
     );
-    type Output = &'static capsules::ninedof::NineDof<'static>;
+    type Output = &'static capsules_extra::ninedof::NineDof<'static>;
 
-    unsafe fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
+    fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
         let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
         let grant_ninedof = self.board_kernel.create_grant(self.driver_num, &grant_cap);
 
-        let ninedof = static_init_half!(
-            static_buffer.0,
-            capsules::ninedof::NineDof<'static>,
-            capsules::ninedof::NineDof::new(static_buffer.1, grant_ninedof)
-        );
+        let ninedof = static_buffer.0.write(capsules_extra::ninedof::NineDof::new(
+            static_buffer.1,
+            grant_ninedof,
+        ));
 
         for driver in static_buffer.1 {
             kernel::hil::sensors::NineDof::set_client(*driver, ninedof);

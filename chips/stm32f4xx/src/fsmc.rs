@@ -1,15 +1,17 @@
-use crate::rcc;
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
+use crate::clocks::{phclk, Stm32f4Clocks};
 use core::cell::Cell;
-use kernel::deferred_call::DeferredCall;
-use kernel::hil::bus8080::{Bus8080, BusWidth, Client};
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
+use kernel::hil::bus8080::{Bus8080, BusAddr8080, BusWidth, Client};
 use kernel::platform::chip::ClockInterface;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
 use kernel::utilities::registers::{register_bitfields, ReadWrite};
 use kernel::utilities::StaticRef;
 use kernel::ErrorCode;
-
-use crate::deferred_calls::DeferredCallTask;
 
 /// FSMC peripheral interface
 #[repr(C)]
@@ -128,11 +130,6 @@ register_bitfields![u32,
     ]
 ];
 
-/// This mechanism allows us to schedule "interrupts" even if the hardware
-/// does not support them.
-static DEFERRED_CALL: DeferredCall<DeferredCallTask> =
-    unsafe { DeferredCall::new(DeferredCallTask::Fsmc) };
-
 const FSMC_BASE: StaticRef<FsmcBankRegisters> =
     unsafe { StaticRef::new(0xA000_0000 as *const FsmcBankRegisters) };
 
@@ -170,22 +167,26 @@ pub struct Fsmc<'a> {
     buffer: TakeCell<'static, [u8]>,
     bus_width: Cell<usize>,
     len: Cell<usize>,
+
+    deferred_call: DeferredCall,
 }
 
 impl<'a> Fsmc<'a> {
-    pub const fn new(bank_addr: [Option<StaticRef<FsmcBank>>; 4], rcc: &'a rcc::Rcc) -> Self {
+    pub fn new(bank_addr: [Option<StaticRef<FsmcBank>>; 4], clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self {
             registers: FSMC_BASE,
             bank: bank_addr,
-            clock: FsmcClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::AHB3(rcc::HCLK3::FMC),
-                rcc,
+            clock: FsmcClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::AHB3(phclk::HCLK3::FMC),
+                clocks,
             )),
             client: OptionalCell::empty(),
 
             buffer: TakeCell::empty(),
             bus_width: Cell::new(1),
             len: Cell::new(0),
+
+            deferred_call: DeferredCall::new(),
         }
     }
 
@@ -238,7 +239,50 @@ impl<'a> Fsmc<'a> {
         self.clock.disable();
     }
 
-    pub fn handle_interrupt(&self) {
+    #[inline]
+    pub fn read_reg(&self, bank: FsmcBanks) -> Option<u16> {
+        self.bank[bank as usize].map_or(None, |bank| Some(bank.ram.get()))
+    }
+
+    #[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
+    #[inline]
+    fn write_reg(&self, bank: FsmcBanks, addr: u16) {
+        use kernel::utilities::registers::interfaces::Writeable;
+        self.bank[bank as usize].map(|bank| bank.reg.set(addr));
+        unsafe {
+            use core::arch::asm;
+            asm!("dsb 0xf");
+        }
+    }
+
+    #[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
+    #[inline]
+    fn write_data(&self, bank: FsmcBanks, data: u16) {
+        use kernel::utilities::registers::interfaces::Writeable;
+        self.bank[bank as usize].map(|bank| bank.ram.set(data));
+        unsafe {
+            use core::arch::asm;
+            asm!("dsb 0xf");
+        }
+    }
+
+    #[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
+    fn write_reg(&self, _bank: FsmcBanks, _addr: u16) {
+        unimplemented!()
+    }
+
+    #[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
+    fn write_data(&self, _bank: FsmcBanks, _data: u16) {
+        unimplemented!()
+    }
+}
+
+impl DeferredCallClient for Fsmc<'_> {
+    fn register(&'static self) {
+        self.deferred_call.register(self);
+    }
+
+    fn handle_deferred_call(&self) {
         self.buffer.take().map_or_else(
             || {
                 self.client.map(move |client| {
@@ -252,32 +296,9 @@ impl<'a> Fsmc<'a> {
             },
         );
     }
-
-    #[inline]
-    pub fn read_reg(&self, bank: FsmcBanks) -> Option<u16> {
-        self.bank[bank as usize].map_or(None, |bank| Some(bank.ram.get()))
-    }
-
-    #[inline]
-    fn write_reg(&self, bank: FsmcBanks, addr: u16) {
-        self.bank[bank as usize].map(|bank| bank.reg.set(addr));
-        #[cfg(all(target_arch = "arm", target_os = "none"))]
-        unsafe {
-            asm!("dsb 0xf");
-        }
-    }
-
-    #[inline]
-    fn write_data(&self, bank: FsmcBanks, data: u16) {
-        self.bank[bank as usize].map(|bank| bank.ram.set(data));
-        #[cfg(all(target_arch = "arm", target_os = "none"))]
-        unsafe {
-            asm!("dsb 0xf");
-        }
-    }
 }
 
-struct FsmcClock<'a>(rcc::PeripheralClock<'a>);
+struct FsmcClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for FsmcClock<'_> {
     fn is_enabled(&self) -> bool {
@@ -294,11 +315,11 @@ impl ClockInterface for FsmcClock<'_> {
 }
 
 impl Bus8080<'static> for Fsmc<'_> {
-    fn set_addr(&self, addr_width: BusWidth, addr: usize) -> Result<(), ErrorCode> {
-        match addr_width {
-            BusWidth::Bits8 => {
+    fn set_addr(&self, addr: BusAddr8080) -> Result<(), ErrorCode> {
+        match addr {
+            BusAddr8080::BusAddr8(addr) => {
                 self.write_reg(FsmcBanks::Bank1, addr as u16);
-                DEFERRED_CALL.set();
+                self.deferred_call.set();
                 Ok(())
             }
             _ => Err(ErrorCode::NOSUPPORT),
@@ -316,20 +337,19 @@ impl Bus8080<'static> for Fsmc<'_> {
             for pos in 0..len {
                 let mut data: u16 = 0;
                 for byte in 0..bytes {
-                    data = data
-                        | (buffer[bytes * pos
-                            + match data_width {
-                                BusWidth::Bits8 | BusWidth::Bits16LE => byte,
-                                BusWidth::Bits16BE => (bytes - byte - 1),
-                            }] as u16)
-                            << (8 * byte);
+                    data |= (buffer[bytes * pos
+                        + match data_width {
+                            BusWidth::Bits8 | BusWidth::Bits16LE => byte,
+                            BusWidth::Bits16BE => bytes - byte - 1,
+                        }] as u16)
+                        << (8 * byte);
                 }
                 self.write_data(FsmcBanks::Bank1, data);
             }
             self.buffer.replace(buffer);
             self.bus_width.set(bytes);
             self.len.set(len);
-            DEFERRED_CALL.set();
+            self.deferred_call.set();
             Ok(())
         } else {
             Err((ErrorCode::NOMEM, buffer))
@@ -350,7 +370,7 @@ impl Bus8080<'static> for Fsmc<'_> {
                         buffer[bytes * pos
                             + match data_width {
                                 BusWidth::Bits8 | BusWidth::Bits16LE => byte,
-                                BusWidth::Bits16BE => (bytes - byte - 1),
+                                BusWidth::Bits16BE => bytes - byte - 1,
                             }] = (data >> (8 * byte)) as u8;
                     }
                 } else {
@@ -360,7 +380,7 @@ impl Bus8080<'static> for Fsmc<'_> {
             self.buffer.replace(buffer);
             self.bus_width.set(bytes);
             self.len.set(len);
-            DEFERRED_CALL.set();
+            self.deferred_call.set();
             Ok(())
         } else {
             Err((ErrorCode::NOMEM, buffer))

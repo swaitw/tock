@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! The TicKV implementation.
 
 use crate::crc32;
@@ -7,7 +11,7 @@ use crate::success_codes::SuccessCode;
 use core::cell::Cell;
 
 /// The current version of TicKV
-pub const VERSION: u8 = 0;
+pub const VERSION: u8 = 1;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum InitState {
@@ -29,8 +33,8 @@ pub(crate) enum KeyState {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RubbishState {
-    ReadRegion(usize),
-    EraseRegion(usize),
+    ReadRegion(usize, usize),
+    EraseRegion(usize, usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -47,6 +51,8 @@ pub(crate) enum State {
     GetKey(KeyState),
     /// Invalidating a key
     InvalidateKey(KeyState),
+    /// Zeroizing a key
+    ZeroiseKey(KeyState),
     /// Running garbage collection
     GarbageCollect(RubbishState),
 }
@@ -92,7 +98,7 @@ pub(crate) const HEADER_LENGTH: usize = HASH_OFFSET + 8;
 pub(crate) const CHECK_SUM_LEN: usize = 4;
 
 /// The main key. A hashed version of this should be passed to
-/// `initalise()`.
+/// `initialise()`.
 pub const MAIN_KEY: &[u8; 15] = b"tickv-super-key";
 
 /// This is the main TicKV struct.
@@ -113,7 +119,7 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
     }
 
     /// This function setups the flash region to be used as a key-value store.
-    /// If the region is already initalised this won't make any changes.
+    /// If the region is already initialised this won't make any changes.
     ///
     /// `hashed_main_key`: The u64 hash of the const string `MAIN_KEY`.
     ///
@@ -122,7 +128,7 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
     ///
     /// On success nothing will be returned.
     /// On error a `ErrorCode` will be returned.
-    pub fn initalise(&self, hashed_main_key: u64) -> Result<SuccessCode, ErrorCode> {
+    pub fn initialise(&self, hashed_main_key: u64) -> Result<SuccessCode, ErrorCode> {
         let mut buf: [u8; 0] = [0; 0];
 
         let key_ret = match self.state.get() {
@@ -135,7 +141,7 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
         };
 
         match key_ret {
-            Ok(ret) => Ok(ret),
+            Ok((ret, _len)) => Ok(ret),
             Err(e) => {
                 match e {
                     ErrorCode::ReadNotReady(reg) => {
@@ -211,26 +217,41 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
     }
 
     // Determine the new region offset to try.
+    //
+    // `region` is the base region. This is the default region
+    // for the object, this won't change per key.
+    // `region_offset` is the current region offset are trying to use
+    // If multiple attempts are required this value will be different
+    // on each iteration. This should be the previous return value of
+    // this function, or zero on the first iteration.
+    //
+    // This function will return an offset that can be applied to
+    // region to determine a new flash region
     // Returns None if there aren't any more in range.
-    fn increment_region_offset(&self, region_offset: isize) -> Option<isize> {
+    fn increment_region_offset(&self, region: usize, region_offset: isize) -> Option<isize> {
         let mut too_big = false;
         let mut too_small = false;
+        let mut new_offset = region_offset;
+
         // Loop until we find a region we can use
-        while !too_big && !too_small {
-            let new_offset = match region_offset {
+        while !too_big || !too_small {
+            new_offset = match new_offset {
+                // If this is the first iteration, just try the next region
                 0 => 1,
-                region_offset if region_offset > 0 => -region_offset,
-                region_offset if region_offset < 0 => -region_offset + 1,
+                // If the offset is positive, return the negative value
+                new_offset if new_offset > 0 => -new_offset,
+                // If the offset is negative, convert to positive and increment by 1
+                new_offset if new_offset < 0 => -new_offset + 1,
                 _ => unreachable!(),
             };
 
             // Make sure our new offset is valid
-            if new_offset as usize > ((self.flash_size / S) - 1) {
+            if (region as isize + new_offset) > ((self.flash_size / S) - 1) as isize {
                 too_big = true;
                 continue;
             }
 
-            if new_offset < 0 {
+            if (region as isize + new_offset) < 0 {
                 too_small = true;
                 continue;
             }
@@ -267,18 +288,33 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
             }
 
             // Check to see if we have data
-            if region_data[offset + VERSION_OFFSET] != 0xFF {
+            if *region_data
+                .get(offset + VERSION_OFFSET)
+                .ok_or((false, ErrorCode::KeyNotFound))?
+                != 0xFF
+            {
                 // Mark that this region isn't empty
                 empty = false;
 
                 // We found a version, check that we support it
-                if region_data[offset + VERSION_OFFSET] != VERSION {
+                if *region_data
+                    .get(offset + VERSION_OFFSET)
+                    .ok_or((false, ErrorCode::KeyNotFound))?
+                    != VERSION
+                {
                     return Err((false, ErrorCode::UnsupportedVersion));
                 }
 
                 // Find this entries length
-                let total_length = ((region_data[offset + LEN_OFFSET] as u16) & !0xF0) << 8
-                    | region_data[offset + LEN_OFFSET + 1] as u16;
+                let total_length = ((*region_data
+                    .get(offset + LEN_OFFSET)
+                    .ok_or((false, ErrorCode::CorruptData))?
+                    as u16)
+                    & !0xF0)
+                    << 8
+                    | *region_data
+                        .get(offset + LEN_OFFSET + 1)
+                        .ok_or((false, ErrorCode::CorruptData))? as u16;
 
                 // Check to see if all fields are just 0
                 if total_length == 0 {
@@ -287,21 +323,50 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
                 }
 
                 // Check to see if the entry has been deleted
-                if region_data[offset + LEN_OFFSET] & 0x80 != 0x80 {
+                if *region_data
+                    .get(offset + LEN_OFFSET)
+                    .ok_or((false, ErrorCode::CorruptData))?
+                    & 0x80
+                    != 0x80
+                {
                     // Increment our offset by the length and repeat the loop
                     offset += total_length as usize;
                     continue;
                 }
 
                 // We have found a valid entry, see if it is ours.
-                if region_data[offset + HASH_OFFSET] != hash[7]
-                    || region_data[offset + HASH_OFFSET + 1] != hash[6]
-                    || region_data[offset + HASH_OFFSET + 2] != hash[5]
-                    || region_data[offset + HASH_OFFSET + 3] != hash[4]
-                    || region_data[offset + HASH_OFFSET + 4] != hash[3]
-                    || region_data[offset + HASH_OFFSET + 5] != hash[2]
-                    || region_data[offset + HASH_OFFSET + 6] != hash[1]
-                    || region_data[offset + HASH_OFFSET + 7] != hash[0]
+                if *region_data
+                    .get(offset + HASH_OFFSET)
+                    .ok_or((false, ErrorCode::CorruptData))?
+                    != *hash.get(7).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 1)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.get(6).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 2)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.get(5).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 3)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.get(4).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 4)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.get(3).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 5)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.get(2).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 6)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.get(1).ok_or((false, ErrorCode::CorruptData))?
+                    || *region_data
+                        .get(offset + HASH_OFFSET + 7)
+                        .ok_or((false, ErrorCode::CorruptData))?
+                        != *hash.first().ok_or((false, ErrorCode::CorruptData))?
                 {
                     // Increment our offset by the length and repeat the loop
                     offset += total_length as usize;
@@ -327,8 +392,7 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
     /// On error a `ErrorCode` will be returned.
     pub fn append_key(&self, hash: u64, value: &[u8]) -> Result<SuccessCode, ErrorCode> {
         let region = self.get_region(hash);
-        let crc = crc32::Crc::new();
-        let mut check_sum = crc.digest();
+        let check_sum = crc32::Crc32::new();
 
         // Length not including check sum
         let package_length = HEADER_LENGTH + value.len();
@@ -345,32 +409,27 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
 
         loop {
             let new_region = match self.state.get() {
-                State::None => region as isize + region_offset,
+                State::None => (region as isize + region_offset) as usize,
                 State::Init(state) => {
                     match state {
-                        InitState::AppendKeyReadRegion(reg) => reg as isize,
+                        InitState::AppendKeyReadRegion(reg) => reg,
                         _ => {
                             // Get the data from that region
-                            region as isize + region_offset
+                            (region as isize + region_offset) as usize
                         }
                     }
                 }
                 State::AppendKey(key_state) => match key_state {
-                    KeyState::ReadRegion(reg) => reg as isize,
+                    KeyState::ReadRegion(reg) => reg,
                 },
-                State::GarbageCollect(RubbishState::ReadRegion(reg)) => reg as isize,
                 _ => unreachable!(),
             };
 
-            let mut region_data = self.read_buffer.take().unwrap();
-            if self.state.get() != State::AppendKey(KeyState::ReadRegion(new_region as usize))
-                && self.state.get()
-                    != State::Init(InitState::AppendKeyReadRegion(new_region as usize))
+            let region_data = self.read_buffer.take().unwrap();
+            if self.state.get() != State::AppendKey(KeyState::ReadRegion(new_region))
+                && self.state.get() != State::Init(InitState::AppendKeyReadRegion(new_region))
             {
-                match self
-                    .controller
-                    .read_region(new_region as usize, 0, &mut region_data)
-                {
+                match self.controller.read_region(new_region, region_data) {
                     Ok(()) => {}
                     Err(e) => {
                         self.read_buffer.replace(Some(region_data));
@@ -398,9 +457,11 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
                     // Replace the buffer
                     self.read_buffer.replace(Some(region_data));
 
-                    match self.increment_region_offset(new_region) {
+                    region_offset = new_region as isize - region as isize;
+                    match self.increment_region_offset(region, region_offset) {
                         Some(o) => {
                             region_offset = o;
+                            self.state.set(State::None);
                         }
                         None => {
                             return Err(ErrorCode::FlashFull);
@@ -410,16 +471,31 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
                 }
 
                 // Check to see if we have data
-                if region_data[offset + VERSION_OFFSET] != 0xFF {
+                if *region_data
+                    .get(offset + VERSION_OFFSET)
+                    .ok_or(ErrorCode::KeyNotFound)?
+                    != 0xFF
+                {
                     // We found a version, check that we support it
-                    if region_data[offset + VERSION_OFFSET] != VERSION {
+                    if *region_data
+                        .get(offset + VERSION_OFFSET)
+                        .ok_or(ErrorCode::KeyNotFound)?
+                        != VERSION
+                    {
                         self.read_buffer.replace(Some(region_data));
                         return Err(ErrorCode::UnsupportedVersion);
                     }
 
                     // Find this entries length
-                    let total_length = ((region_data[offset + LEN_OFFSET] as u16) & !0xF0) << 8
-                        | region_data[offset + LEN_OFFSET + 1] as u16;
+                    let total_length = ((*region_data
+                        .get(offset + LEN_OFFSET)
+                        .ok_or(ErrorCode::CorruptData)?
+                        as u16)
+                        & !0xF0)
+                        << 8
+                        | *region_data
+                            .get(offset + LEN_OFFSET + 1)
+                            .ok_or(ErrorCode::CorruptData)? as u16;
 
                     // Increment our offset by the length and repeat the loop
                     offset += total_length as usize;
@@ -431,35 +507,67 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
 
                 // Check to see if the entire header is 0xFFFF_FFFF_FFFF_FFFF
                 // To avoid operating on 64-bit values check every 8 bytes at a time
-                if region_data[offset + HASH_OFFSET] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 1] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 1)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 2] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 2)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 3] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 3)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 4] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 4)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 5] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 5)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 6] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 6)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
-                if region_data[offset + HASH_OFFSET + 7] != 0xFF {
+                if *region_data
+                    .get(offset + HASH_OFFSET + 7)
+                    .ok_or(ErrorCode::CorruptData)?
+                    != 0xFF
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::CorruptData);
                 }
@@ -468,24 +576,52 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
 
                 // Copy in new header
                 // This is a little painful, but avoids any unsafe Rust
-                region_data[offset + VERSION_OFFSET] = header.version;
-                region_data[offset + LEN_OFFSET] =
+                *region_data
+                    .get_mut(offset + VERSION_OFFSET)
+                    .ok_or(ErrorCode::RegionFull)? = header.version;
+                *region_data
+                    .get_mut(offset + LEN_OFFSET)
+                    .ok_or(ErrorCode::RegionFull)? =
                     (header.len >> 8) as u8 & 0x0F | (header.flags << 4) & 0xF0;
-                region_data[offset + LEN_OFFSET + 1] = (header.len & 0xFF) as u8;
-                region_data[offset + HASH_OFFSET] = (header.hashed_key >> 56) as u8;
-                region_data[offset + HASH_OFFSET + 1] = (header.hashed_key >> 48) as u8;
-                region_data[offset + HASH_OFFSET + 2] = (header.hashed_key >> 40) as u8;
-                region_data[offset + HASH_OFFSET + 3] = (header.hashed_key >> 32) as u8;
-                region_data[offset + HASH_OFFSET + 4] = (header.hashed_key >> 24) as u8;
-                region_data[offset + HASH_OFFSET + 5] = (header.hashed_key >> 16) as u8;
-                region_data[offset + HASH_OFFSET + 6] = (header.hashed_key >> 8) as u8;
-                region_data[offset + HASH_OFFSET + 7] = (header.hashed_key) as u8;
+                *region_data
+                    .get_mut(offset + LEN_OFFSET + 1)
+                    .ok_or(ErrorCode::RegionFull)? = (header.len & 0xFF) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 56) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 1)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 48) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 2)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 40) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 3)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 32) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 4)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 24) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 5)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 16) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 6)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key >> 8) as u8;
+                *region_data
+                    .get_mut(offset + HASH_OFFSET + 7)
+                    .ok_or(ErrorCode::RegionFull)? = (header.hashed_key) as u8;
 
                 // Hash the new header data
-                check_sum.update(&region_data[offset + VERSION_OFFSET..=offset + HASH_OFFSET + 7]);
+                check_sum.update(
+                    region_data
+                        .get(offset + VERSION_OFFSET..=offset + HASH_OFFSET + 7)
+                        .ok_or(ErrorCode::CorruptData)?,
+                );
 
                 // Copy the value
-                let slice = &mut region_data[(offset + HEADER_LENGTH)..(offset + package_length)];
+                let slice = region_data
+                    .get_mut((offset + HEADER_LENGTH)..(offset + package_length))
+                    .ok_or(ErrorCode::ObjectTooLarge)?;
                 slice.copy_from_slice(value);
 
                 // Include the value in the hash
@@ -493,14 +629,17 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
 
                 // Append a Check Hash
                 let check_sum = check_sum.finalise();
-                let slice = &mut region_data
-                    [(offset + package_length)..(offset + package_length + CHECK_SUM_LEN)];
+                let slice = region_data
+                    .get_mut((offset + package_length)..(offset + package_length + CHECK_SUM_LEN))
+                    .ok_or(ErrorCode::ObjectTooLarge)?;
                 slice.copy_from_slice(&check_sum.to_ne_bytes());
 
                 // Write the data back to the region
                 if let Err(e) = self.controller.write(
-                    S * new_region as usize + offset,
-                    &region_data[offset..(offset + package_length + CHECK_SUM_LEN)],
+                    S * new_region + offset,
+                    region_data
+                        .get(offset..(offset + package_length + CHECK_SUM_LEN))
+                        .ok_or(ErrorCode::ObjectTooLarge)?,
                 ) {
                     self.read_buffer.replace(Some(region_data));
                     match e {
@@ -517,48 +656,44 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
 
     /// Retrieves the value from flash storage.
     ///
-    /// `hash`: A hashed key.
-    /// `buf`: A buffer to store the value to.
+    /// - `hash`: A hashed key.
+    /// - `buf`: A buffer to store the value to.
     ///
-    /// On success nothing will be returned.
-    /// On error a `ErrorCode` will be returned.
+    /// On success a `SuccessCode` will be returned and the length of the value
+    /// for the corresponding key. On error a `ErrorCode` will be returned.
     ///
-    /// If a power loss occurs before success is returned the data is
-    /// assumed to be lost.
-    pub fn get_key(&self, hash: u64, buf: &mut [u8]) -> Result<SuccessCode, ErrorCode> {
+    /// If a power loss occurs before success is returned the data is assumed to
+    /// be lost.
+    pub fn get_key(&self, hash: u64, buf: &mut [u8]) -> Result<(SuccessCode, usize), ErrorCode> {
         let region = self.get_region(hash);
 
         let mut region_offset: isize = 0;
 
         loop {
-            let crc = crc32::Crc::new();
-            let mut check_sum = crc.digest();
+            let check_sum = crc32::Crc32::new();
             let new_region = match self.state.get() {
-                State::None => region as isize + region_offset,
+                State::None => (region as isize + region_offset) as usize,
                 State::Init(state) => {
                     match state {
-                        InitState::GetKeyReadRegion(reg) => reg as isize,
+                        InitState::GetKeyReadRegion(reg) => reg,
                         _ => {
                             // Get the data from that region
-                            region as isize + region_offset
+                            (region as isize + region_offset) as usize
                         }
                     }
                 }
                 State::GetKey(key_state) => match key_state {
-                    KeyState::ReadRegion(reg) => reg as isize,
+                    KeyState::ReadRegion(reg) => reg,
                 },
                 _ => unreachable!(),
             };
 
             // Get the data from that region
-            let mut region_data = self.read_buffer.take().unwrap();
-            if self.state.get() != State::GetKey(KeyState::ReadRegion(new_region as usize))
-                && self.state.get() != State::Init(InitState::GetKeyReadRegion(new_region as usize))
+            let region_data = self.read_buffer.take().unwrap();
+            if self.state.get() != State::GetKey(KeyState::ReadRegion(new_region))
+                && self.state.get() != State::Init(InitState::GetKeyReadRegion(new_region))
             {
-                match self
-                    .controller
-                    .read_region(new_region as usize, 0, &mut region_data)
-                {
+                match self.controller.read_region(new_region, region_data) {
                     Ok(()) => {}
                     Err(e) => {
                         self.read_buffer.replace(Some(region_data));
@@ -573,45 +708,76 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
             match self.find_key_offset(hash, region_data) {
                 Ok((offset, total_length)) => {
                     // Add the header data to the check hash
-                    check_sum.update(&region_data[offset..(HEADER_LENGTH + offset)]);
+                    check_sum.update(
+                        region_data
+                            .get(offset..(HEADER_LENGTH + offset))
+                            .ok_or(ErrorCode::ObjectTooLarge)?,
+                    );
+
+                    // The size of the stored object's actual data;
+                    let value_length = total_length as usize - HEADER_LENGTH - CHECK_SUM_LEN;
 
                     // Make sure if will fit in the buffer
-                    if buf.len() < (total_length as usize - HEADER_LENGTH - CHECK_SUM_LEN) {
+                    if buf.len() < value_length {
+                        // The entire value is not going to fit,
+                        // Let's still copy in what we can and return an error
+                        for i in 0..buf.len() {
+                            *buf.get_mut(i)
+                                .ok_or(ErrorCode::BufferTooSmall(value_length))? = *region_data
+                                .get(offset + HEADER_LENGTH + i)
+                                .ok_or(ErrorCode::BufferTooSmall(value_length))?;
+                        }
+
                         self.read_buffer.replace(Some(region_data));
-                        return Err(ErrorCode::BufferTooSmall(
-                            total_length as usize - HEADER_LENGTH - CHECK_SUM_LEN,
-                        ));
+                        return Err(ErrorCode::BufferTooSmall(value_length));
                     }
 
                     // Copy in the value
-                    for i in 0..(total_length as usize - HEADER_LENGTH - CHECK_SUM_LEN) {
-                        buf[i] = region_data[offset + HEADER_LENGTH + i];
-                        check_sum.update(&[buf[i]])
+                    for i in 0..value_length {
+                        *buf.get_mut(i)
+                            .ok_or(ErrorCode::BufferTooSmall(value_length))? = *region_data
+                            .get(offset + HEADER_LENGTH + i)
+                            .ok_or(ErrorCode::CorruptData)?;
+                        check_sum.update(&[*buf.get(i).ok_or(ErrorCode::CorruptData)?])
                     }
 
                     // Check the hash
                     let check_sum = check_sum.finalise();
                     let check_sum = check_sum.to_ne_bytes();
 
-                    if check_sum[3] != region_data[offset + total_length as usize - 1]
-                        || check_sum[2] != region_data[offset + total_length as usize - 2]
-                        || check_sum[1] != region_data[offset + total_length as usize - 3]
-                        || check_sum[0] != region_data[offset + total_length as usize - 4]
+                    if *check_sum.get(3).ok_or(ErrorCode::InvalidCheckSum)?
+                        != *region_data
+                            .get(offset + total_length as usize - 1)
+                            .ok_or(ErrorCode::InvalidCheckSum)?
+                        || *check_sum.get(2).ok_or(ErrorCode::InvalidCheckSum)?
+                            != *region_data
+                                .get(offset + total_length as usize - 2)
+                                .ok_or(ErrorCode::InvalidCheckSum)?
+                        || *check_sum.get(1).ok_or(ErrorCode::InvalidCheckSum)?
+                            != *region_data
+                                .get(offset + total_length as usize - 3)
+                                .ok_or(ErrorCode::InvalidCheckSum)?
+                        || *check_sum.first().ok_or(ErrorCode::InvalidCheckSum)?
+                            != *region_data
+                                .get(offset + total_length as usize - 4)
+                                .ok_or(ErrorCode::InvalidCheckSum)?
                     {
                         self.read_buffer.replace(Some(region_data));
                         return Err(ErrorCode::InvalidCheckSum);
                     }
 
                     self.read_buffer.replace(Some(region_data));
-                    return Ok(SuccessCode::Complete);
+                    return Ok((SuccessCode::Complete, value_length));
                 }
                 Err((cont, e)) => {
                     self.read_buffer.replace(Some(region_data));
 
                     if cont {
-                        match self.increment_region_offset(new_region) {
+                        region_offset = new_region as isize - region as isize;
+                        match self.increment_region_offset(region, region_offset) {
                             Some(o) => {
                                 region_offset = o;
+                                self.state.set(State::None);
                             }
                             None => {
                                 return Err(e);
@@ -642,20 +808,17 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
         loop {
             // Get the data from that region
             let new_region = match self.state.get() {
-                State::None => region as isize + region_offset,
+                State::None => (region as isize + region_offset) as usize,
                 State::InvalidateKey(key_state) => match key_state {
-                    KeyState::ReadRegion(reg) => reg as isize,
+                    KeyState::ReadRegion(reg) => reg,
                 },
                 _ => unreachable!(),
             };
 
             // Get the data from that region
-            let mut region_data = self.read_buffer.take().unwrap();
-            if self.state.get() != State::InvalidateKey(KeyState::ReadRegion(new_region as usize)) {
-                match self
-                    .controller
-                    .read_region(new_region as usize, 0, &mut region_data)
-                {
+            let region_data = self.read_buffer.take().unwrap();
+            if self.state.get() != State::InvalidateKey(KeyState::ReadRegion(new_region)) {
+                match self.controller.read_region(new_region, region_data) {
                     Ok(()) => {}
                     Err(e) => {
                         self.read_buffer.replace(Some(region_data));
@@ -671,11 +834,15 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
             match self.find_key_offset(hash, region_data) {
                 Ok((offset, _data_len)) => {
                     // We found a key, let's delete it
-                    region_data[offset + LEN_OFFSET] &= !0x80;
+                    *region_data
+                        .get_mut(offset + LEN_OFFSET)
+                        .ok_or(ErrorCode::CorruptData)? &= !0x80;
 
                     if let Err(e) = self.controller.write(
-                        S * new_region as usize + offset + LEN_OFFSET,
-                        &region_data[offset + LEN_OFFSET..offset + LEN_OFFSET + 1],
+                        S * new_region + offset + LEN_OFFSET,
+                        region_data
+                            .get(offset + LEN_OFFSET..offset + LEN_OFFSET + 1)
+                            .ok_or(ErrorCode::ObjectTooLarge)?,
                     ) {
                         self.read_buffer.replace(Some(region_data));
                         match e {
@@ -691,9 +858,11 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
                     self.read_buffer.replace(Some(region_data));
 
                     if cont {
-                        match self.increment_region_offset(new_region) {
+                        region_offset = new_region as isize - region as isize;
+                        match self.increment_region_offset(region, region_offset) {
                             Some(o) => {
                                 region_offset = o;
+                                self.state.set(State::None);
                             }
                             None => {
                                 return Err(e);
@@ -707,17 +876,132 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
         }
     }
 
-    fn garbage_collect_region(&self, region: usize) -> Result<usize, ErrorCode> {
+    /// Zeroises the key in flash storage.
+    ///
+    /// This is similar to the `invalidate_key()` function, but instead will
+    /// change all `1`s in the value and checksum to `0`s. This does
+    /// not remove the header, as that is required for garbage collection
+    /// later on, so the length and hashed key will still be preserved.
+    ///
+    /// The values will be changed by a single write operation to the flash.
+    /// The values are not securley overwritten to make restoring data
+    /// difficult.
+    ///
+    /// Users will need to check with the hardware specifications to determine
+    /// if this is cryptographically secure for their use case.
+    ///
+    /// <https://en.wikipedia.org/wiki/Zeroisation>
+    ///
+    /// `hash`: A hashed key.
+    ///
+    /// On success nothing will be returned.
+    /// On error a `ErrorCode` will be returned.
+    ///
+    /// If a power loss occurs before success is returned the data is
+    /// assumed to be lost.
+    pub fn zeroise_key(&self, hash: u64) -> Result<SuccessCode, ErrorCode> {
+        let region = self.get_region(hash);
+
+        let mut region_offset: isize = 0;
+
+        loop {
+            // Get the data from that region
+            let new_region = match self.state.get() {
+                State::None => (region as isize + region_offset) as usize,
+                State::ZeroiseKey(key_state) => match key_state {
+                    KeyState::ReadRegion(reg) => reg,
+                },
+                _ => unreachable!(),
+            };
+
+            // Get the data from that region
+            let region_data = self.read_buffer.take().unwrap();
+            if self.state.get() != State::ZeroiseKey(KeyState::ReadRegion(new_region)) {
+                match self.controller.read_region(new_region, region_data) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.read_buffer.replace(Some(region_data));
+                        if let ErrorCode::ReadNotReady(reg) = e {
+                            self.state.set(State::ZeroiseKey(KeyState::ReadRegion(reg)));
+                        }
+                        return Err(e);
+                    }
+                };
+            }
+
+            match self.find_key_offset(hash, region_data) {
+                Ok((offset, data_len)) => {
+                    // We found a key, let's delete it
+                    *region_data
+                        .get_mut(offset + LEN_OFFSET)
+                        .ok_or(ErrorCode::CorruptData)? &= !0x80;
+
+                    // Replace Value with 0s
+                    for i in HEADER_LENGTH..(data_len as usize + HEADER_LENGTH) {
+                        *region_data
+                            .get_mut(offset + i)
+                            .ok_or(ErrorCode::RegionFull)? = 0;
+                    }
+
+                    let write_len = data_len as usize;
+
+                    if let Err(e) = self.controller.write(
+                        S * new_region + offset,
+                        region_data
+                            .get(offset..offset + write_len)
+                            .ok_or(ErrorCode::ObjectTooLarge)?,
+                    ) {
+                        self.read_buffer.replace(Some(region_data));
+                        match e {
+                            ErrorCode::WriteNotReady(_) => return Ok(SuccessCode::Queued),
+                            _ => return Err(e),
+                        }
+                    }
+
+                    self.read_buffer.replace(Some(region_data));
+                    return Ok(SuccessCode::Written);
+                }
+                Err((cont, e)) => {
+                    self.read_buffer.replace(Some(region_data));
+
+                    if cont {
+                        region_offset = new_region as isize - region as isize;
+                        match self.increment_region_offset(region, region_offset) {
+                            Some(o) => {
+                                region_offset = o;
+                                self.state.set(State::None);
+                            }
+                            None => {
+                                return Err(e);
+                            }
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    fn garbage_collect_region(
+        &self,
+        region: usize,
+        flash_freed: usize,
+    ) -> Result<usize, ErrorCode> {
         // Get the data from that region
-        let mut region_data = self.read_buffer.take().unwrap();
-        if self.state.get() != State::GarbageCollect(RubbishState::ReadRegion(region)) {
-            match self.controller.read_region(region, 0, &mut region_data) {
+        let region_data = self.read_buffer.take().unwrap();
+        if self.state.get() != State::GarbageCollect(RubbishState::ReadRegion(region, flash_freed))
+        {
+            match self.controller.read_region(region, region_data) {
                 Ok(()) => {}
                 Err(e) => {
                     self.read_buffer.replace(Some(region_data));
                     if let ErrorCode::ReadNotReady(reg) = e {
                         self.state
-                            .set(State::GarbageCollect(RubbishState::ReadRegion(reg)));
+                            .set(State::GarbageCollect(RubbishState::ReadRegion(
+                                reg,
+                                flash_freed,
+                            )));
                     }
                     return Err(e);
                 }
@@ -735,9 +1019,17 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
             }
 
             // Check to see if we have data
-            if region_data[offset + VERSION_OFFSET] != 0xFF {
+            if *region_data
+                .get(offset + VERSION_OFFSET)
+                .ok_or(ErrorCode::KeyNotFound)?
+                != 0xFF
+            {
                 // We found a version, check that we support it
-                if region_data[offset + VERSION_OFFSET] != VERSION {
+                if *region_data
+                    .get(offset + VERSION_OFFSET)
+                    .ok_or(ErrorCode::KeyNotFound)?
+                    != VERSION
+                {
                     self.read_buffer.replace(Some(region_data));
                     return Err(ErrorCode::UnsupportedVersion);
                 }
@@ -745,11 +1037,22 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
                 entry_found = true;
 
                 // Find this entries length
-                let total_length = ((region_data[offset + LEN_OFFSET] as u16) & !0xF0) << 8
-                    | region_data[offset + LEN_OFFSET + 1] as u16;
+                let total_length = ((*region_data
+                    .get(offset + LEN_OFFSET)
+                    .ok_or(ErrorCode::CorruptData)? as u16)
+                    & !0xF0)
+                    << 8
+                    | *region_data
+                        .get(offset + LEN_OFFSET + 1)
+                        .ok_or(ErrorCode::CorruptData)? as u16;
 
                 // Check to see if the entry has been deleted
-                if region_data[offset + LEN_OFFSET] & 0x80 != 0x80 {
+                if *region_data
+                    .get(offset + LEN_OFFSET)
+                    .ok_or(ErrorCode::CorruptData)?
+                    & 0x80
+                    != 0x80
+                {
                     // The entry has been deleted, this region might be ready
                     // for erasure.
                     // Increment our offset by the length and repeat the loop
@@ -783,7 +1086,10 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
         if let Err(e) = self.controller.erase_region(region) {
             if let ErrorCode::EraseNotReady(reg) = e {
                 self.state
-                    .set(State::GarbageCollect(RubbishState::EraseRegion(reg)));
+                    .set(State::GarbageCollect(RubbishState::EraseRegion(
+                        reg,
+                        flash_freed + S,
+                    )));
             }
             return Err(e);
         }
@@ -801,15 +1107,21 @@ impl<'a, C: FlashController<S>, const S: usize> TicKV<'a, C, S> {
         let start = match self.state.get() {
             State::None => 0,
             State::GarbageCollect(state) => match state {
-                RubbishState::ReadRegion(reg) => reg,
+                RubbishState::ReadRegion(reg, ff) => {
+                    flash_freed += ff;
+                    reg
+                }
                 // We already erased region reg, so move to the next one
-                RubbishState::EraseRegion(reg) => reg + 1,
+                RubbishState::EraseRegion(reg, ff) => {
+                    flash_freed += ff;
+                    reg + 1
+                }
             },
             _ => unreachable!(),
         };
 
         for i in start..num_region {
-            match self.garbage_collect_region(i) {
+            match self.garbage_collect_region(i, flash_freed) {
                 Ok(freed) => flash_freed += freed,
                 Err(e) => return Err(e),
             }

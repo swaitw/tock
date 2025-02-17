@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Analog to Digital Converter Peripheral
 
 use crate::rcc;
@@ -9,9 +13,6 @@ use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
 use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
 use kernel::ErrorCode;
-
-pub trait EverythingClient: hil::adc::Client + hil::adc::HighSpeedClient {}
-impl<C: hil::adc::Client + hil::adc::HighSpeedClient> EverythingClient for C {}
 
 #[repr(C)]
 struct AdcRegisters {
@@ -503,7 +504,7 @@ pub struct Adc<'a> {
     common_registers: StaticRef<AdcCommonRegisters>,
     clock: AdcClock<'a>,
     status: Cell<ADCStatus>,
-    client: OptionalCell<&'static dyn hil::adc::Client>,
+    client: OptionalCell<&'a dyn hil::adc::Client>,
     requested: Cell<ADCStatus>,
     requested_channel: Cell<u32>,
     sc_enabled: Cell<bool>,
@@ -547,7 +548,7 @@ impl<'a> Adc<'a> {
         // when ADVRGEN becomes enabled
         // we chose 720 because the frequency is 72MHz and it needs 10 us to become enabled
         for _i in 0..720 {
-            cortexm4::support::nop()
+            cortexm4f::support::nop()
         }
 
         // Enable ADC Ready interrupt
@@ -643,7 +644,7 @@ impl<'a> Adc<'a> {
     }
 
     fn sample_u32(&self, channel: u32) -> Result<(), ErrorCode> {
-        if self.sc_enabled.get() == false {
+        if !self.sc_enabled.get() {
             self.enable_special_channels();
         }
         if self.status.get() == ADCStatus::Idle {
@@ -679,7 +680,7 @@ impl ClockInterface for AdcClock<'_> {
     }
 }
 
-impl hil::adc::Adc for Adc<'_> {
+impl<'a> hil::adc::Adc<'a> for Adc<'a> {
     type Channel = Channel;
 
     fn sample(&self, channel: &Self::Channel) -> Result<(), ErrorCode> {
@@ -722,13 +723,13 @@ impl hil::adc::Adc for Adc<'_> {
         Some(3300)
     }
 
-    fn set_client(&self, client: &'static dyn hil::adc::Client) {
+    fn set_client(&self, client: &'a dyn hil::adc::Client) {
         self.client.set(client);
     }
 }
 
 /// Not yet supported
-impl hil::adc::AdcHighSpeed for Adc<'_> {
+impl<'a> hil::adc::AdcHighSpeed<'a> for Adc<'a> {
     /// Capture buffered samples from the ADC continuously at a given
     /// frequency, calling the client whenever a buffer fills up. The client is
     /// then expected to either stop sampling or provide an additional buffer
@@ -774,4 +775,6 @@ impl hil::adc::AdcHighSpeed for Adc<'_> {
     ) -> Result<(Option<&'static mut [u16]>, Option<&'static mut [u16]>), ErrorCode> {
         Err(ErrorCode::NOSUPPORT)
     }
+
+    fn set_highspeed_client(&self, _client: &'a dyn hil::adc::HighSpeedClient) {}
 }
