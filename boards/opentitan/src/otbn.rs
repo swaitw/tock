@@ -1,10 +1,14 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Components for collections of Hardware Accelerators.
 //!
 //! Usage
 //! -----
 //! ```rust
 //!     let _mux_otbn = crate::otbn::AccelMuxComponent::new(&peripherals.otbn)
-//!         .finalize(otbn_mux_component_helper!());
+//!         .finalize(otbn_mux_component_static!());
 //!
 //!     peripherals.otbn.initialise(
 //!         dynamic_deferred_caller
@@ -15,18 +19,20 @@
 
 use core::mem::MaybeUninit;
 use kernel::component::Component;
-use kernel::static_init_half;
 use lowrisc::otbn::Otbn;
-use lowrisc::virtual_otbn::MuxAccel;
+use lowrisc::virtual_otbn::{MuxAccel, VirtualMuxAccel};
 
-// Setup static space for the objects.
 #[macro_export]
-macro_rules! otbn_mux_component_helper {
-    ($T:expr $(,)?) => {{
-        use core::mem::MaybeUninit;
-        use lowrisc::virtual_otbn::MuxAccel;
-        static mut BUF1: MaybeUninit<MuxAccel<'static>> = MaybeUninit::uninit();
-        &mut BUF1
+macro_rules! otbn_mux_component_static {
+    () => {{
+        kernel::static_buf!(lowrisc::virtual_otbn::MuxAccel<'static>)
+    }};
+}
+
+#[macro_export]
+macro_rules! otbn_component_static {
+    () => {{
+        kernel::static_buf!(lowrisc::virtual_otbn::VirtualMuxAccel<'static>)
     }};
 }
 
@@ -44,10 +50,30 @@ impl Component for AccelMuxComponent {
     type StaticInput = &'static mut MaybeUninit<MuxAccel<'static>>;
     type Output = &'static MuxAccel<'static>;
 
-    unsafe fn finalize(self, s: Self::StaticInput) -> Self::Output {
-        let mux_otbn = static_init_half!(s, MuxAccel<'static>, MuxAccel::new(self.otbn));
+    fn finalize(self, s: Self::StaticInput) -> Self::Output {
+        s.write(MuxAccel::new(self.otbn))
+    }
+}
 
-        mux_otbn
+pub struct OtbnComponent {
+    mux_otbn: &'static MuxAccel<'static>,
+}
+
+impl OtbnComponent {
+    pub fn new(mux_otbn: &'static MuxAccel<'static>) -> OtbnComponent {
+        OtbnComponent { mux_otbn }
+    }
+}
+
+impl Component for OtbnComponent {
+    type StaticInput = &'static mut MaybeUninit<VirtualMuxAccel<'static>>;
+
+    type Output = &'static VirtualMuxAccel<'static>;
+
+    fn finalize(self, s: Self::StaticInput) -> Self::Output {
+        let virtual_otbn_user = s.write(VirtualMuxAccel::new(self.mux_otbn));
+
+        virtual_otbn_user
     }
 }
 
@@ -55,7 +81,7 @@ impl Component for AccelMuxComponent {
 ///
 /// This will iterate through the app list inside the `app_flash` looking
 /// for a disabled app with the same name as `name`.
-/// On sucess this function will return the following information:
+/// On success this function will return the following information:
 ///    * OTBN imem start address
 ///    * OTBN imem size
 ///    * OTBN dmem start address

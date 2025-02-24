@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Interface for symmetric-cipher encryption
 //!
 //! see boards/imix/src/aes_test.rs for example usage
@@ -136,6 +140,43 @@ pub trait AES128CCM<'a> {
         m_len: usize,
         mic_len: usize,
         confidential: bool,
+        encrypting: bool,
+    ) -> Result<(), (ErrorCode, &'static mut [u8])>;
+}
+
+pub trait GCMClient {
+    /// `res` is Ok(()) if the encryption/decryption process succeeded. This
+    /// does not mean that the message has been verified in the case of
+    /// decryption.
+    /// If we are encrypting: `tag_is_valid` is `true` iff `res` is Ok(()).
+    /// If we are decrypting: `tag_is_valid` is `true` iff `res` is Ok(()) and the
+    /// message authentication tag is valid.
+    fn crypt_done(&self, buf: &'static mut [u8], res: Result<(), ErrorCode>, tag_is_valid: bool);
+}
+
+pub trait AES128GCM<'a> {
+    /// Set the client instance which will receive `crypt_done()` callbacks
+    fn set_client(&'a self, client: &'a dyn GCMClient);
+
+    /// Set the key to be used for GCM encryption
+    /// Returns `INVAL` if length is not `AES128_KEY_SIZE`
+    fn set_key(&self, key: &[u8]) -> Result<(), ErrorCode>;
+
+    /// Set the IV to be used for GCM encryption. The IV should be less
+    /// or equal to 12 bytes (96 bits) as recommened in NIST-800-38D.
+    /// Returns `INVAL` if length is greater then 12 bytes
+    fn set_iv(&self, nonce: &[u8]) -> Result<(), ErrorCode>;
+
+    /// Try to begin the encryption/decryption process
+    /// The possible ErrorCodes are:
+    ///     - `BUSY`: An operation is already in progress
+    ///     - `SIZE`: The offset and lengths don't fit inside the buffer
+    fn crypt(
+        &self,
+        buf: &'static mut [u8],
+        aad_offset: usize,
+        message_offset: usize,
+        message_len: usize,
         encrypting: bool,
     ) -> Result<(), (ErrorCode, &'static mut [u8])>;
 }

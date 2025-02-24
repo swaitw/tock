@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Support for the CSRNG hardware block on OpenTitan
 //!
 //! <https://docs.opentitan.org/hw/ip/csrng/doc>
@@ -21,15 +25,15 @@ register_structs! {
         (0x14 => ctrl: ReadWrite<u32, CTRL::Register>),
         (0x18 => cmd_req: WriteOnly<u32, COMMAND::Register>),
         (0x1C => sw_cmd_sts: ReadOnly<u32, SW_CMD_STS::Register>),
-        (0x20 => genbits_vld: ReadOnly<u32>),
+        (0x20 => genbits_vld: ReadOnly<u32, GENBIT_VLD::Register>),
         (0x24 => genbits: ReadOnly<u32>),
         (0x28 => int_state_num: ReadWrite<u32>),
         (0x2C => int_state_val: ReadOnly<u32>),
         (0x30 => hw_exc_sts: ReadWrite<u32>),
-        (0x34 => err_code: ReadOnly<u32>),
-        (0x38 => err_code_test: ReadWrite<u32>),
-        (0x3C => sel_tracking_sm: WriteOnly<u32>),
-        (0x40 => tracking_sm_obs: ReadOnly<u32>),
+        (0x34 => recov_alert_sts: ReadWrite<u32>),
+        (0x38 => err_code: ReadOnly<u32>),
+        (0x3C => err_code_test: ReadWrite<u32>),
+        (0x40 => main_sm_state: ReadOnly<u32>),
         (0x44 => @END),
     }
 }
@@ -46,12 +50,17 @@ register_bitfields![u32,
     ],
     CTRL [
         ENABLE OFFSET(0) NUMBITS(4) [
-            ENABLE = 0xA,
+            ENABLE = 0x6,
+            DISABLE = 0x9,
         ],
         SW_APP_ENABLE OFFSET(4) NUMBITS(4) [
-            ENABLE = 0xA,
+            ENABLE = 0x6,
+            DISABLE = 0x9,
         ],
-        READ_INT_STATE OFFSET(4) NUMBITS(4) [],
+        READ_INT_STATE OFFSET(8) NUMBITS(4) [
+            ENABLE = 0x6,
+            DISABLE = 0x9,
+        ],
     ],
     COMMAND [
         ACMD OFFSET(0) NUMBITS(4) [
@@ -62,14 +71,22 @@ register_bitfields![u32,
             UNINSTANTIATE = 5,
         ],
         CLEN OFFSET(4) NUMBITS(4) [],
-        FLAGS OFFSET(8) NUMBITS(4) [],
-        GLEN OFFSET(12) NUMBITS(19) [],
+        FLAGS OFFSET(8) NUMBITS(4) [
+            INSTANTIATE_SOURCE_XOR_SEED = 0x9,
+            INSTANTIATE_ZERO_ADDITIONAL_SEED = 0x6,
+        ],
+        GLEN OFFSET(12) NUMBITS(13) [],
+    ],
+    GENBIT_VLD [
+        GENBITS_VLD OFFSET(0) NUMBITS(1) [],
     ],
     SW_CMD_STS [
         CMD_RDY OFFSET(0) NUMBITS(1) [],
         CMD_STS OFFSET(1) NUMBITS(1) [],
     ],
 ];
+
+pub const TWO_UNITS_OF_128BIT_ENTROPY: u32 = 0x02;
 
 pub struct CsRng<'a> {
     registers: StaticRef<CsRngRegisters>,
@@ -83,11 +100,10 @@ impl Iterator for CsRngIter<'_, '_> {
     type Item = u32;
 
     fn next(&mut self) -> Option<u32> {
-        let ret = self.0.registers.genbits.get();
-        if ret == 0 {
-            None
+        if self.0.registers.genbits_vld.is_set(GENBIT_VLD::GENBITS_VLD) {
+            Some(self.0.registers.genbits.get())
         } else {
-            Some(ret)
+            None
         }
     }
 }
@@ -158,6 +174,20 @@ impl<'a> CsRng<'a> {
             }
         }
     }
+
+    /// Wait for the IP to be ready for a new command, if we take too long and timeout
+    /// return BUSY. This MUST be checked prior to issuing new commands.
+    /// CMD_RDY: is set when the command interface is ready to accept a command.
+    fn wait_for_cmd_ready(&self) -> Result<(), ErrorCode> {
+        for _i in 0..10000 {
+            if self.registers.sw_cmd_sts.is_set(SW_CMD_STS::CMD_RDY) {
+                // We are ready to issue a command
+                return Ok(());
+            }
+        }
+        // Timed out
+        Err(ErrorCode::BUSY)
+    }
 }
 
 impl<'a> Entropy32<'a> for CsRng<'a> {
@@ -173,22 +203,40 @@ impl<'a> Entropy32<'a> for CsRng<'a> {
             return Err(ErrorCode::FAIL);
         }
 
-        self.registers
-            .ctrl
-            .write(CTRL::ENABLE::ENABLE + CTRL::SW_APP_ENABLE::ENABLE);
+        self.registers.ctrl.write(
+            CTRL::ENABLE::ENABLE + CTRL::READ_INT_STATE::ENABLE + CTRL::SW_APP_ENABLE::ENABLE,
+        );
 
-        self.registers
-            .cmd_req
-            .write(COMMAND::ACMD::INSTANTIATE + COMMAND::CLEN.val(0));
-        while !self.registers.sw_cmd_sts.is_set(SW_CMD_STS::CMD_RDY) {}
+        // Check if IP ready for new command
+        match self.wait_for_cmd_ready() {
+            Ok(()) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Init IP
+        self.registers.cmd_req.write(
+            COMMAND::ACMD::INSTANTIATE
+                + COMMAND::FLAGS::INSTANTIATE_ZERO_ADDITIONAL_SEED
+                + COMMAND::CLEN.val(0x00)
+                + COMMAND::GLEN.val(0x00),
+        );
+
+        // Check if IP ready for new command
+        match self.wait_for_cmd_ready() {
+            Ok(()) => {}
+            Err(e) => return Err(e),
+        }
 
         self.disable_interrupts();
         self.enable_interrupts();
 
         // Get 256 bits of entropy
-        self.registers
-            .cmd_req
-            .write(COMMAND::ACMD::GENERATE + COMMAND::GLEN.val(0x2));
+        self.registers.cmd_req.write(
+            COMMAND::ACMD::GENERATE
+                + COMMAND::FLAGS.val(0)
+                + COMMAND::CLEN.val(0x00)
+                + COMMAND::GLEN.val(TWO_UNITS_OF_128BIT_ENTROPY),
+        );
 
         Ok(())
     }

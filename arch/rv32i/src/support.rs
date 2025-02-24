@@ -1,21 +1,26 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Core low-level operations.
 
 use crate::csr::{mstatus::mstatus, CSR};
-use core::ops::FnOnce;
 
-#[cfg(all(target_arch = "riscv32", target_os = "none"))]
+#[cfg(any(doc, all(target_arch = "riscv32", target_os = "none")))]
 #[inline(always)]
 /// NOP instruction
 pub fn nop() {
+    use core::arch::asm;
     unsafe {
         asm!("nop", options(nomem, nostack, preserves_flags));
     }
 }
 
-#[cfg(all(target_arch = "riscv32", target_os = "none"))]
+#[cfg(any(doc, all(target_arch = "riscv32", target_os = "none")))]
 #[inline(always)]
 /// WFI instruction
 pub unsafe fn wfi() {
+    use core::arch::asm;
     asm!("wfi", options(nomem, nostack));
 }
 
@@ -45,13 +50,13 @@ where
 }
 
 // Mock implementations for tests on Travis-CI.
-#[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+#[cfg(not(any(doc, all(target_arch = "riscv32", target_os = "none"))))]
 /// NOP instruction (mock)
 pub fn nop() {
     unimplemented!()
 }
 
-#[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+#[cfg(not(any(doc, all(target_arch = "riscv32", target_os = "none"))))]
 /// WFI instruction (mock)
 pub unsafe fn wfi() {
     unimplemented!()

@@ -1,10 +1,14 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Shared implementations for ARM Cortex-M0+ MCUs.
 
 #![crate_name = "cortexm0p"]
 #![crate_type = "rlib"]
-#![feature(asm)]
-#![feature(naked_functions)]
 #![no_std]
+
+use core::fmt::Write;
 
 pub mod mpu {
     pub type MPU = cortexm::mpu::MPU<8, 256>;
@@ -17,35 +21,30 @@ pub use cortexm::support;
 pub use cortexm::initialize_ram_jump_to_main;
 pub use cortexm::interrupt_mask;
 pub use cortexm::nvic;
-pub use cortexm::print_cortexm_state as print_cortexm0_state;
 pub use cortexm::scb;
-pub use cortexm::syscall;
 pub use cortexm::systick;
 pub use cortexm::unhandled_interrupt;
-pub use cortexm0::generic_isr;
-pub use cortexm0::hard_fault_handler;
-pub use cortexm0::systick_handler;
+pub use cortexm::CortexMVariant;
+use cortexm0::CortexM0;
 
 // Mock implementation for tests on Travis-CI.
-#[cfg(not(any(target_arch = "arm", target_os = "none")))]
-pub unsafe extern "C" fn switch_to_user(
-    _user_stack: *const u8,
-    _process_regs: &mut [usize; 8],
-) -> *mut u8 {
+#[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
+pub unsafe extern "C" fn svc_handler_m0p() {
     unimplemented!()
 }
 
-// Mock implementation for tests on Travis-CI.
-#[cfg(not(any(target_arch = "arm", target_os = "none")))]
-pub unsafe extern "C" fn svc_handler() {
-    unimplemented!()
+#[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
+extern "C" {
+    pub fn svc_handler_m0p();
 }
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-#[naked]
-pub unsafe extern "C" fn svc_handler() {
-    asm!(
-        "
+#[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
+core::arch::global_asm!(
+    "
+  .section .svc_handler_m0p, \"ax\"
+  .global svc_handler_m0p
+  .thumb_func
+svc_handler_m0p:
   ldr r0, 100f // EXC_RETURN_MSP
   cmp lr, r0
   bne 300f // to_kernel
@@ -72,7 +71,42 @@ pub unsafe extern "C" fn svc_handler() {
   .word 0xFFFFFFF9
 200: // EXC_RETURN_PSP
   .word 0xFFFFFFFD
-  ",
-        options(noreturn)
-    );
+  "
+);
+
+// Enum with no variants to ensure that this type is not instantiable. It is
+// only used to pass architecture-specific constants and functions via the
+// `CortexMVariant` trait.
+pub enum CortexM0P {}
+
+impl cortexm::CortexMVariant for CortexM0P {
+    const GENERIC_ISR: unsafe extern "C" fn() = CortexM0::GENERIC_ISR;
+    const SYSTICK_HANDLER: unsafe extern "C" fn() = CortexM0::SYSTICK_HANDLER;
+    const SVC_HANDLER: unsafe extern "C" fn() = svc_handler_m0p;
+    const HARD_FAULT_HANDLER: unsafe extern "C" fn() = CortexM0::HARD_FAULT_HANDLER;
+
+    #[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
+    unsafe fn switch_to_user(
+        user_stack: *const usize,
+        process_regs: &mut [usize; 8],
+    ) -> *const usize {
+        CortexM0::switch_to_user(user_stack, process_regs)
+    }
+
+    #[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
+    unsafe fn switch_to_user(
+        _user_stack: *const usize,
+        _process_regs: &mut [usize; 8],
+    ) -> *const usize {
+        unimplemented!()
+    }
+
+    #[inline]
+    unsafe fn print_cortexm_state(writer: &mut dyn Write) {
+        cortexm::print_cortexm_state(writer)
+    }
+}
+
+pub mod syscall {
+    pub type SysCall = cortexm::syscall::SysCall<crate::CortexM0P>;
 }

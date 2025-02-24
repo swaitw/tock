@@ -1,3 +1,7 @@
+/* Licensed under the Apache License, Version 2.0 or the MIT License. */
+/* SPDX-License-Identifier: Apache-2.0 OR MIT                         */
+/* Copyright Tock Contributors 2023.                                  */
+
 MEMORY
 {
   # with bootloader
@@ -8,7 +12,6 @@ MEMORY
   ram (rwx) : ORIGIN = 0x20000000, LENGTH = 128K
 }
 
-MPU_MIN_ALIGN = 8K;
 PAGE_SIZE = 4K;
 
-INCLUDE ../kernel_layout.ld
+INCLUDE tock_kernel_layout.ld

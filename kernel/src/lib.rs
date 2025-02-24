@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Core Tock Kernel
 //!
 //! The kernel crate implements the core features of Tock as well as shared
@@ -85,20 +89,26 @@
 //!    this use case. It is likely we will have to create new interfaces as new
 //!    use cases are discovered.
 
-#![feature(core_intrinsics, const_fn_trait_bound)]
 #![warn(unreachable_pub)]
 #![no_std]
 
-// Define the kernel major and minor versions
-pub const MAJOR: u16 = 2;
-pub const MINOR: u16 = 0;
+/// Kernel major version.
+///
+/// This is compiled with the crate to enable for checking of compatibility with
+/// loaded apps. Both major and minor version constants are updated during a
+/// release.
+pub const KERNEL_MAJOR_VERSION: u16 = 2;
+/// Kernel minor version.
+///
+/// This is compiled with the crate to enable for checking of compatibility with
+/// loaded apps.
+pub const KERNEL_MINOR_VERSION: u16 = 1;
 
 pub mod capabilities;
 pub mod collections;
 pub mod component;
 pub mod debug;
 pub mod deferred_call;
-pub mod dynamic_deferred_call;
 pub mod errorcode;
 pub mod grant;
 pub mod hil;
@@ -106,8 +116,10 @@ pub mod introspection;
 pub mod ipc;
 pub mod platform;
 pub mod process;
+pub mod process_checker;
 pub mod processbuffer;
 pub mod scheduler;
+pub mod storage_permissions;
 pub mod syscall;
 pub mod upcall;
 pub mod utilities;
@@ -115,9 +127,11 @@ pub mod utilities;
 mod config;
 mod kernel;
 mod memop;
+mod process_binary;
+mod process_loading;
 mod process_policies;
+mod process_printer;
 mod process_standard;
-mod process_utilities;
 mod syscall_driver;
 
 // Core resources exposed as `kernel::Type`.

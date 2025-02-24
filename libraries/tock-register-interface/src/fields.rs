@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Register bitfield types and macros
 //!
 //! To conveniently access and manipulate fields of a register, this
@@ -9,7 +13,7 @@
 //!
 //! A specific section (bitfield) in a register is described by the
 //! [`Field`] type, consisting of an unshifted bitmask over the base
-//! register [`UIntLike`](crate::UIntLike) type, and a shift
+//! register [`UIntLike`] type, and a shift
 //! parameter. It is further associated with a specific
 //! [`RegisterLongName`], which can prevent its use with incompatible
 //! registers.
@@ -23,7 +27,7 @@
 //! ## `register_bitfields` macro
 //!
 //! For defining register layouts with an associated
-//! [`RegisterLongName`](crate::RegisterLongName), along with
+//! [`RegisterLongName`], along with
 //! [`Field`]s and matching [`FieldValue`]s, a convenient macro-based
 //! interface can be used.
 //!
@@ -57,6 +61,12 @@
 //! assert!(reg.read(Uart::ENABLE) == 0x00000000);
 //! reg.modify(Uart::ENABLE::ON);
 //! assert!(reg.get() == 0x00000008);
+//!
+//! use tock_registers::interfaces::Debuggable;
+//! assert!(
+//!     &format!("{:?}", reg.debug())
+//!     == "Uart { ENABLE: ON }"
+//! );
 //! ```
 
 // The register interface uses `+` in a way that is fine for bitfields, but
@@ -82,8 +92,8 @@ pub struct Field<T: UIntLike, R: RegisterLongName> {
 impl<T: UIntLike, R: RegisterLongName> Field<T, R> {
     pub const fn new(mask: T, shift: usize) -> Field<T, R> {
         Field {
-            mask: mask,
-            shift: shift,
+            mask,
+            shift,
             associated_register: PhantomData,
         }
     }
@@ -101,6 +111,42 @@ impl<T: UIntLike, R: RegisterLongName> Field<T, R> {
 
     #[inline]
     /// Read value of the field as an enum member
+    ///
+    /// This method expects to be passed the unasked and unshifted register
+    /// value, extracts the field value by calling [`Field::read`] and
+    /// subsequently passes that value to the [`TryFromValue`] implementation on
+    /// the passed enum type.
+    ///
+    /// The [`register_bitfields!`](crate::register_bitfields) macro will
+    /// generate an enum containing the various named field variants and
+    /// implementing the required [`TryFromValue`] trait. It is accessible as
+    /// `$REGISTER_NAME::$FIELD_NAME::Value`.
+    ///
+    /// This method can be useful to symbolically represent read register field
+    /// states throughout the codebase and to enforce exhaustive matches over
+    /// all defined valid register field values.
+    ///
+    /// ## Usage Example
+    ///
+    /// ```rust
+    /// # use tock_registers::interfaces::Readable;
+    /// # use tock_registers::registers::InMemoryRegister;
+    /// # use tock_registers::register_bitfields;
+    /// register_bitfields![u8,
+    ///     EXAMPLEREG [
+    ///         TESTFIELD OFFSET(3) NUMBITS(3) [
+    ///             Foo = 2,
+    ///             Bar = 3,
+    ///             Baz = 6,
+    ///         ],
+    ///     ],
+    /// ];
+    ///
+    /// assert_eq!(
+    ///     EXAMPLEREG::TESTFIELD.read_as_enum::<EXAMPLEREG::TESTFIELD::Value>(0x9C).unwrap(),
+    ///     EXAMPLEREG::TESTFIELD::Value::Bar
+    /// );
+    /// ```
     pub fn read_as_enum<E: TryFromValue<T, EnumType = E>>(self, val: T) -> Option<E> {
         E::try_from_value(self.read(val))
     }
@@ -124,11 +170,7 @@ impl<T: UIntLike, R: RegisterLongName> Field<T, R> {
 // Relevant Rust issue: https://github.com/rust-lang/rust/issues/26925
 impl<T: UIntLike, R: RegisterLongName> Clone for Field<T, R> {
     fn clone(&self) -> Self {
-        Field {
-            mask: self.mask,
-            shift: self.shift,
-            associated_register: self.associated_register,
-        }
+        *self
     }
 }
 impl<T: UIntLike, R: RegisterLongName> Copy for Field<T, R> {}
@@ -136,7 +178,7 @@ impl<T: UIntLike, R: RegisterLongName> Copy for Field<T, R> {}
 macro_rules! Field_impl_for {
     ($type:ty) => {
         impl<R: RegisterLongName> Field<$type, R> {
-            pub fn val(&self, value: $type) -> FieldValue<$type, R> {
+            pub const fn val(&self, value: $type) -> FieldValue<$type, R> {
                 FieldValue::<$type, R>::new(self.mask, self.shift, value)
             }
         }
@@ -194,9 +236,18 @@ FieldValue_impl_for!(u128);
 FieldValue_impl_for!(usize);
 
 impl<T: UIntLike, R: RegisterLongName> FieldValue<T, R> {
+    #[inline]
+    pub fn none() -> Self {
+        Self {
+            mask: T::zero(),
+            value: T::zero(),
+            associated_register: PhantomData,
+        }
+    }
+
     /// Get the raw bitmask represented by this FieldValue.
     #[inline]
-    pub fn mask(&self) -> T {
+    pub const fn mask(&self) -> T {
         self.mask as T
     }
 
@@ -211,10 +262,12 @@ impl<T: UIntLike, R: RegisterLongName> FieldValue<T, R> {
         (val & !self.mask) | self.value
     }
 
-    /// Check if any specified parts of a field match
+    /// Check if any of the bits covered by the mask for this
+    /// `FieldValue` and set in the `FieldValue` are also set
+    /// in the passed value
     #[inline]
-    pub fn matches_any(&self, val: T) -> bool {
-        val & self.mask != T::zero()
+    pub fn any_matching_bits_set(&self, val: T) -> bool {
+        val & self.mask & self.value != T::zero()
     }
 
     /// Check if all specified parts of a field match
@@ -269,40 +322,44 @@ macro_rules! register_bitmasks {
     {
         // BITFIELD_NAME OFFSET(x)
         $(#[$outer:meta])*
-        $valtype:ident, $reg_desc:ident, [
+        $valtype:ident, $reg_mod:ident, $reg_desc:ident, [
             $( $(#[$inner:meta])* $field:ident OFFSET($offset:expr)),+ $(,)?
         ]
     } => {
         $(#[$outer])*
         $( $crate::register_bitmasks!($valtype, $reg_desc, $(#[$inner])* $field, $offset, 1, []); )*
+        $crate::register_bitmasks!(@debug $valtype, $reg_mod, $reg_desc, [$($field),*]);
     };
+
     {
         // BITFIELD_NAME OFFSET
         // All fields are 1 bit
         $(#[$outer:meta])*
-        $valtype:ident, $reg_desc:ident, [
+        $valtype:ident, $reg_mod:ident, $reg_desc:ident, [
             $( $(#[$inner:meta])* $field:ident $offset:expr ),+ $(,)?
         ]
     } => {
         $(#[$outer])*
         $( $crate::register_bitmasks!($valtype, $reg_desc, $(#[$inner])* $field, $offset, 1, []); )*
+        $crate::register_bitmasks!(@debug $valtype, $reg_mod, $reg_desc, [$($field),*]);
     };
 
     {
         // BITFIELD_NAME OFFSET(x) NUMBITS(y)
         $(#[$outer:meta])*
-        $valtype:ident, $reg_desc:ident, [
+        $valtype:ident, $reg_mod:ident, $reg_desc:ident, [
             $( $(#[$inner:meta])* $field:ident OFFSET($offset:expr) NUMBITS($numbits:expr) ),+ $(,)?
         ]
     } => {
         $(#[$outer])*
         $( $crate::register_bitmasks!($valtype, $reg_desc, $(#[$inner])* $field, $offset, $numbits, []); )*
+        $crate::register_bitmasks!(@debug $valtype, $reg_mod, $reg_desc, [$($field),*]);
     };
 
     {
         // BITFIELD_NAME OFFSET(x) NUMBITS(y) []
         $(#[$outer:meta])*
-        $valtype:ident, $reg_desc:ident, [
+        $valtype:ident, $reg_mod:ident, $reg_desc:ident, [
             $( $(#[$inner:meta])* $field:ident OFFSET($offset:expr) NUMBITS($numbits:expr)
                $values:tt ),+ $(,)?
         ]
@@ -310,7 +367,9 @@ macro_rules! register_bitmasks {
         $(#[$outer])*
         $( $crate::register_bitmasks!($valtype, $reg_desc, $(#[$inner])* $field, $offset, $numbits,
                               $values); )*
+        $crate::register_bitmasks!(@debug $valtype, $reg_mod, $reg_desc, [$($field),*]);
     };
+
     {
         $valtype:ident, $reg_desc:ident, $(#[$outer:meta])* $field:ident,
                     $offset:expr, $numbits:expr,
@@ -354,6 +413,7 @@ macro_rules! register_bitmasks {
 
             #[allow(dead_code)]
             #[allow(non_camel_case_types)]
+            #[derive(Copy, Clone, Debug, Eq, PartialEq)]
             #[repr($valtype)] // so that values larger than isize::MAX can be stored
             $(#[$outer])*
             pub enum Value {
@@ -375,6 +435,12 @@ macro_rules! register_bitmasks {
 
                         _ => Option::None
                     }
+                }
+            }
+
+            impl From<Value> for FieldValue<$valtype, $reg_desc> {
+                fn from(v: Value) -> Self {
+                    Self::new($crate::bitmask!($numbits), $offset, v as $valtype)
                 }
             }
         }
@@ -411,6 +477,7 @@ macro_rules! register_bitmasks {
 
             #[allow(dead_code)]
             #[allow(non_camel_case_types)]
+            #[derive(Debug)]
             $(#[$outer])*
             pub enum Value {}
 
@@ -423,9 +490,100 @@ macro_rules! register_bitmasks {
             }
         }
     };
+
+    // Implement the `RegisterDebugInfo` trait for the register. Refer to its
+    // documentation for more information on the individual types and fields.
+    (
+        // final implementation of the macro
+        @debug $valtype:ident, $reg_mod:ident, $reg_desc:ident, [$($field:ident),*]
+    ) => {
+        impl $crate::debug::RegisterDebugInfo<$valtype> for $reg_desc {
+            // Sequence of field value enum types (implementing `TryFromValue`,
+            // produced above), generated by recursing over the fields:
+            type FieldValueEnumTypes = $crate::register_bitmasks!(
+                @fv_enum_type_seq $valtype, $($field::Value),*
+            );
+
+            fn name() -> &'static str {
+                stringify!($reg_mod)
+            }
+
+            fn field_names() -> &'static [&'static str] {
+                &[
+                    $(
+                        stringify!($field)
+                    ),*
+                ]
+            }
+
+            fn fields() -> &'static [Field<$valtype, Self>] {
+                &[
+                    $(
+                        $field
+                    ),*
+                ]
+            }
+        }
+    };
+
+    // Build the recursive `FieldValueEnumSeq` type sequence. This will generate
+    // a type signature of the form:
+    //
+    // ```
+    // FieldValueEnumCons<u32, Foo,
+    //     FieldValueEnumCons<u32, Bar,
+    //         FieldValueEnumCons<u32, Baz,
+    //             FieldValueEnumNil
+    //         >
+    //     >
+    // >
+    // ```
+    (
+        @fv_enum_type_seq $valtype:ident, $enum_val:path $(, $($rest:path),+)?
+    ) => {
+        $crate::debug::FieldValueEnumCons<
+            $valtype,
+            $enum_val,
+            $crate::register_bitmasks!(@fv_enum_type_seq $valtype $(, $($rest),*)*)
+        >
+    };
+    (
+        @fv_enum_type_seq $valtype:ident $(,)?
+    ) => {
+        $crate::debug::FieldValueEnumNil
+    };
 }
 
 /// Define register types and fields.
+///
+/// Implementations of memory-mapped registers can use this macro to define the
+/// structure and bitwise meaning of individual registers in the peripheral. An
+/// example use for a hypothetical UART driver might look like:
+///
+/// ```rust,ignore
+/// register_bitfields![u32,
+///     CONTROL [
+///         ENABLE OFFSET(0) NUMBITS(1),
+///         STOP_BITS OFFSET(1) NUMBITS(2) [
+///             StopBits1 = 0,
+///             StopBits2 = 1,
+///             StopBits0 = 2
+///         ]
+///     ],
+///     BYTE [
+///         CHARACTER OFFSET(0) NUMBITS(8)
+///     ],
+///     INTERRUPT [
+///         TRANSMITTED OFFSET(0) NUMBITS(1),
+///         RECEIVED OFFSET(1) NUMBITS(1),
+///         FIFO_FULL OFFSET(2) NUMBITS(1)
+///     ]
+/// ];
+/// ```
+///
+/// Each field in the register can be identified by its offset within the
+/// register and its bitwidth. Fields that have discrete options with semantic
+/// meaning can be enumerated.
 #[macro_export]
 macro_rules! register_bitfields {
     {
@@ -446,13 +604,12 @@ macro_rules! register_bitfields {
 
                 use $crate::fields::Field;
 
-                $crate::register_bitmasks!( $valtype, Register, $fields );
+                $crate::register_bitmasks!( $valtype, $reg, Register, $fields );
             }
         )*
     }
 }
 
-#[cfg(feature = "std_unit_tests")]
 #[cfg(test)]
 mod tests {
     #[derive(Debug, PartialEq, Eq)]
@@ -627,22 +784,20 @@ mod tests {
         }
 
         #[test]
-        fn test_matches_any() {
+        fn test_any_matching_bits_set() {
             let field = Field::<u32, ()>::new(0xFF, 4);
-            assert_eq!(field.val(0x23).matches_any(0x1234), true);
-            assert_eq!(field.val(0x23).matches_any(0x5678), true);
-            assert_eq!(field.val(0x23).matches_any(0x5008), false);
+            assert_eq!(field.val(0x23).any_matching_bits_set(0x1234), true);
+            assert_eq!(field.val(0x23).any_matching_bits_set(0x5678), true);
+            assert_eq!(field.val(0x23).any_matching_bits_set(0x5008), false);
 
             for shift in 0..24 {
                 let field = Field::<u32, ()>::new(0xFF, shift);
-                for x in 0..=0xFF {
-                    let field_value = field.val(x);
-                    for y in 1..=0xFF {
-                        assert_eq!(field_value.matches_any(y << shift), true);
-                    }
-                    assert_eq!(field_value.matches_any(0), false);
-                    assert_eq!(field_value.matches_any(!(0xFF << shift)), false);
+                let field_value = field.val(0xff);
+                for y in 1..=0xff {
+                    assert_eq!(field_value.any_matching_bits_set(y << shift), true,);
                 }
+                assert_eq!(field_value.any_matching_bits_set(0), false);
+                assert_eq!(field_value.any_matching_bits_set(!(0xFF << shift)), false);
             }
         }
 
@@ -659,6 +814,35 @@ mod tests {
                     assert_eq!(field.val(x + 1).matches_all(x << shift), false);
                 }
             }
+        }
+
+        #[test]
+        fn test_matches_any() {
+            register_bitfields! {
+                u32,
+
+                TEST [
+                    FLAG OFFSET(18) NUMBITS(1) [],
+                    SIZE OFFSET(0) NUMBITS(2) [
+                        Byte = 0,
+                        Halfword = 1,
+                        Word = 2
+                    ],
+                ]
+            }
+
+            let value: crate::LocalRegisterCopy<u32, TEST::Register> =
+                crate::LocalRegisterCopy::new(2);
+            assert!(value.matches_any(&[TEST::SIZE::Word]));
+            assert!(!value.matches_any(&[TEST::SIZE::Halfword]));
+            assert!(!value.matches_any(&[TEST::SIZE::Byte]));
+            assert!(value.matches_any(&[TEST::SIZE::Word, TEST::FLAG::SET]));
+            assert!(value.matches_any(&[TEST::SIZE::Halfword, TEST::FLAG::CLEAR]));
+            assert!(!value.matches_any(&[TEST::SIZE::Halfword, TEST::FLAG::SET]));
+            let value: crate::LocalRegisterCopy<u32, TEST::Register> =
+                crate::LocalRegisterCopy::new(266241);
+            assert!(value.matches_any(&[TEST::FLAG::SET]));
+            assert!(!value.matches_any(&[TEST::FLAG::CLEAR]));
         }
 
         #[test]

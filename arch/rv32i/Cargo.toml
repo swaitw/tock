@@ -1,8 +1,12 @@
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright Tock Contributors 2022.
+
 [package]
 name = "rv32i"
-version = "0.1.0"
-authors = ["Tock Project Developers <tock-dev@googlegroups.com>"]
-edition = "2021"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
 kernel = { path = "../../kernel" }
@@ -10,3 +14,6 @@ tock-registers = { path = "../../libraries/tock-register-interface" }
 riscv-csr = { path = "../../libraries/riscv-csr" }
 riscv = { path = "../riscv" }
 
+
+[lints]
+workspace = true

@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Fixed Priority Scheduler for Tock
 //!
 //! This scheduler assigns priority to processes based on their order in the
@@ -10,10 +14,11 @@
 //! is running. The only way for a process to longer be the highest priority is
 //! for an interrupt to occur, which will cause the process to stop running.
 
-use crate::dynamic_deferred_call::DynamicDeferredCall;
-use crate::kernel::{Kernel, StoppedExecutingReason};
+use crate::deferred_call::DeferredCall;
+use crate::kernel::Kernel;
 use crate::platform::chip::Chip;
 use crate::process::ProcessId;
+use crate::process::StoppedExecutingReason;
 use crate::scheduler::{Scheduler, SchedulingDecision};
 use crate::utilities::cells::OptionalCell;
 
@@ -33,23 +38,20 @@ impl PrioritySched {
 }
 
 impl<C: Chip> Scheduler<C> for PrioritySched {
-    fn next(&self, kernel: &Kernel) -> SchedulingDecision {
-        if kernel.processes_blocked() {
-            // No processes ready
-            SchedulingDecision::TrySleep
-        } else {
-            // Iterates in-order through the process array, always running the
-            // first process it finds that is ready to run. This enforces the
-            // priorities of all processes.
-            let next = self
-                .kernel
-                .get_process_iter()
-                .find(|&proc| proc.ready())
-                .map_or(None, |proc| Some(proc.processid()));
-            self.running.insert(next);
+    fn next(&self) -> SchedulingDecision {
+        // Iterates in-order through the process array, always running the
+        // first process it finds that is ready to run. This enforces the
+        // priorities of all processes.
+        let next = self
+            .kernel
+            .get_process_iter()
+            .find(|&proc| proc.ready())
+            .map(|proc| proc.processid());
+        self.running.insert(next);
 
-            SchedulingDecision::RunProcess((next.unwrap(), None))
-        }
+        next.map_or(SchedulingDecision::TrySleep, |next| {
+            SchedulingDecision::RunProcess((next, None))
+        })
     }
 
     unsafe fn continue_process(&self, _: ProcessId, chip: &C) -> bool {
@@ -58,12 +60,12 @@ impl<C: Chip> Scheduler<C> for PrioritySched {
         // a system call by this process could make another process ready, if
         // this app is communicating via IPC with a higher priority app.
         !(chip.has_pending_interrupts()
-            || DynamicDeferredCall::global_instance_calls_pending().unwrap_or(false)
+            || DeferredCall::has_tasks()
             || self
                 .kernel
                 .get_process_iter()
                 .find(|proc| proc.ready())
-                .map_or(false, |ready_proc| {
+                .is_some_and(|ready_proc| {
                     self.running.map_or(false, |running| {
                         ready_proc.processid().index < running.index
                     })
