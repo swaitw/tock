@@ -1,14 +1,16 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Components for GPIO pins.
-//!
 //!
 //! Usage
 //! -----
 //!
-//! The `gpio_component_helper!` macro takes 'static references to
-//! GPIO pins. When GPIO instances are owned values, the
-//! `gpio_component_helper_owned!` can be used, indicating that the
-//! passed values are owned values. This macro will perform static
-//! allocation of the passed in GPIO pins internally.
+//! The `gpio_component_helper!` macro takes 'static references to GPIO pins.
+//! When GPIO instances are owned values, the `gpio_component_helper_owned!` can
+//! be used, indicating that the passed values are owned values. This macro will
+//! perform static allocation of the passed in GPIO pins internally.
 //!
 //! ```rust
 //! let gpio = components::gpio::GpioComponent::new(
@@ -43,17 +45,16 @@
 //!         22 => &nrf52840::gpio::PORT[Pin::P1_04],
 //!         23 => &nrf52840::gpio::PORT[Pin::P1_02]
 //!     ),
-//! ).finalize(components::gpio_component_buf!(nrf52840::gpio::GPIOPin));
+//! ).finalize(components::gpio_component_static!(nrf52840::gpio::GPIOPin));
 //! ```
 
-use capsules::gpio::GPIO;
+use capsules_core::gpio::GPIO;
 use core::mem::MaybeUninit;
 use kernel::capabilities;
 use kernel::component::Component;
 use kernel::create_capability;
 use kernel::hil::gpio;
 use kernel::hil::gpio::InterruptWithValue;
-use kernel::static_init_half;
 
 #[macro_export]
 macro_rules! gpio_component_helper_max_pin {
@@ -112,14 +113,13 @@ macro_rules! gpio_component_helper {
 }
 
 #[macro_export]
-macro_rules! gpio_component_buf {
+macro_rules! gpio_component_static {
     ($Pin:ty $(,)?) => {{
-        use capsules::gpio::GPIO;
-        use core::mem::MaybeUninit;
-        static mut BUF: MaybeUninit<GPIO<'static, $Pin>> = MaybeUninit::uninit();
-        &mut BUF
+        kernel::static_buf!(capsules_core::gpio::GPIO<'static, $Pin>)
     };};
 }
+
+pub type GpioComponentType<IP> = GPIO<'static, IP>;
 
 pub struct GpioComponent<IP: 'static + gpio::InterruptPin<'static>> {
     board_kernel: &'static kernel::Kernel,
@@ -134,7 +134,7 @@ impl<IP: 'static + gpio::InterruptPin<'static>> GpioComponent<IP> {
         gpio_pins: &'static [Option<&'static gpio::InterruptValueWrapper<'static, IP>>],
     ) -> Self {
         Self {
-            board_kernel: board_kernel,
+            board_kernel,
             driver_num,
             gpio_pins,
         }
@@ -145,16 +145,12 @@ impl<IP: 'static + gpio::InterruptPin<'static>> Component for GpioComponent<IP> 
     type StaticInput = &'static mut MaybeUninit<GPIO<'static, IP>>;
     type Output = &'static GPIO<'static, IP>;
 
-    unsafe fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
+    fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
         let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
-        let gpio = static_init_half!(
-            static_buffer,
-            GPIO<'static, IP>,
-            GPIO::new(
-                self.gpio_pins,
-                self.board_kernel.create_grant(self.driver_num, &grant_cap)
-            )
-        );
+        let gpio = static_buffer.write(GPIO::new(
+            self.gpio_pins,
+            self.board_kernel.create_grant(self.driver_num, &grant_cap),
+        ));
         for maybe_pin in self.gpio_pins.iter() {
             if let Some(pin) = maybe_pin {
                 pin.set_client(gpio);

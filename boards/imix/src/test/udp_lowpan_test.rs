@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! `udp_lowpan_test.rs`: Kernel test suite for the UDP/6LoWPAN stack
 //!
 //! This file tests port binding and sending and receiving messages from kernel space.
@@ -116,18 +120,19 @@
 //! ```
 
 use super::super::imix_components::test::mock_udp::MockUDPComponent;
-use super::super::imix_components::test::mock_udp2::MockUDPComponent2;
-use capsules::net::ipv6::ip_utils::IPAddr;
-use capsules::net::ipv6::ipv6_send::IP6SendStruct;
-use capsules::net::network_capabilities::{
+use crate::mock_udp_component_static;
+use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
+use capsules_extra::net::ipv6::ip_utils::IPAddr;
+use capsules_extra::net::ipv6::ipv6_send::IP6SendStruct;
+use capsules_extra::net::network_capabilities::{
     AddrRange, NetworkCapability, PortRange, UdpVisibilityCapability,
 };
-use capsules::net::udp::udp_port_table::UdpPortManager;
-use capsules::net::udp::udp_recv::MuxUdpReceiver;
-use capsules::net::udp::udp_send::MuxUdpSender;
-use capsules::test::udp::MockUdp;
-use capsules::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
+use capsules_extra::net::udp::udp_port_table::UdpPortManager;
+use capsules_extra::net::udp::udp_recv::MuxUdpReceiver;
+use capsules_extra::net::udp::udp_send::MuxUdpSender;
+use capsules_extra::test::udp::MockUdp;
 use core::cell::Cell;
+use core::ptr::addr_of_mut;
 use kernel::capabilities::NetworkCapabilityCreationCapability;
 use kernel::component::Component;
 use kernel::create_capability;
@@ -172,7 +177,7 @@ pub unsafe fn initialize_all(
     mux_alarm: &'static MuxAlarm<'static, sam4l::ast::Ast>,
 ) -> &'static LowpanTest<
     'static,
-    capsules::virtual_alarm::VirtualMuxAlarm<'static, sam4l::ast::Ast<'static>>,
+    capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<'static, sam4l::ast::Ast<'static>>,
 > {
     let create_cap = create_capability!(NetworkCapabilityCreationCapability);
     let net_cap = static_init!(
@@ -188,26 +193,26 @@ pub unsafe fn initialize_all(
         udp_recv_mux,
         port_table,
         mux_alarm,
-        &mut UDP_PAYLOAD1,
+        &mut *addr_of_mut!(UDP_PAYLOAD1),
         1, //id
         3, //dst_port
         net_cap,
         udp_vis,
     )
-    .finalize(());
+    .finalize(mock_udp_component_static!());
 
-    let mock_udp2 = MockUDPComponent2::new(
+    let mock_udp2 = MockUDPComponent::new(
         udp_send_mux,
         udp_recv_mux,
         port_table,
         mux_alarm,
-        &mut UDP_PAYLOAD2,
+        &mut *addr_of_mut!(UDP_PAYLOAD2),
         2, //id
         4, //dst_port
         net_cap,
         udp_vis,
     )
-    .finalize(());
+    .finalize(mock_udp_component_static!());
 
     let alarm = static_init!(
         VirtualMuxAlarm<'static, sam4l::ast::Ast>,
@@ -233,11 +238,11 @@ impl<'a, A: time::Alarm<'a>> LowpanTest<'a, A> {
         mock_udp2: &'static MockUdp<'a, A>,
     ) -> LowpanTest<'a, A> {
         LowpanTest {
-            alarm: alarm,
+            alarm,
             test_counter: Cell::new(0),
-            port_table: port_table,
-            mock_udp1: mock_udp1,
-            mock_udp2: mock_udp2,
+            port_table,
+            mock_udp1,
+            mock_udp2,
             test_mode: Cell::new(TestMode::DefaultMode),
         }
     }

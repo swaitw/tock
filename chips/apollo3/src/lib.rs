@@ -1,8 +1,11 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Peripheral implementations for the Apollo3 MCU.
 
 #![crate_name = "apollo3"]
 #![crate_type = "rlib"]
-#![feature(asm, const_fn_trait_bound)]
 #![no_std]
 
 // Peripherals
@@ -10,18 +13,17 @@ pub mod ble;
 pub mod cachectrl;
 pub mod chip;
 pub mod clkgen;
+pub mod flashctrl;
 pub mod gpio;
 pub mod iom;
+pub mod ios;
 pub mod mcuctrl;
 pub mod nvic;
 pub mod pwrctrl;
 pub mod stimer;
 pub mod uart;
 
-use cortexm4::{
-    generic_isr, hard_fault_handler, initialize_ram_jump_to_main, scb, svc_handler,
-    systick_handler, unhandled_interrupt,
-};
+use cortexm4f::{initialize_ram_jump_to_main, scb, unhandled_interrupt, CortexM4F, CortexMVariant};
 
 extern "C" {
     // _estack is not really a function, but it makes the types work
@@ -38,20 +40,20 @@ extern "C" {
 pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     _estack,
     initialize_ram_jump_to_main,
-    unhandled_interrupt, // NMI
-    hard_fault_handler,  // Hard Fault
-    unhandled_interrupt, // MemManage
-    unhandled_interrupt, // BusFault
-    unhandled_interrupt, // UsageFault
+    unhandled_interrupt,           // NMI
+    CortexM4F::HARD_FAULT_HANDLER, // Hard Fault
+    unhandled_interrupt,           // MemManage
+    unhandled_interrupt,           // BusFault
+    unhandled_interrupt,           // UsageFault
     unhandled_interrupt,
     unhandled_interrupt,
     unhandled_interrupt,
     unhandled_interrupt,
-    svc_handler,         // SVC
-    unhandled_interrupt, // DebugMon
+    CortexM4F::SVC_HANDLER, // SVC
+    unhandled_interrupt,    // DebugMon
     unhandled_interrupt,
-    unhandled_interrupt, // PendSV
-    systick_handler,     // SysTick
+    unhandled_interrupt,        // PendSV
+    CortexM4F::SYSTICK_HANDLER, // SysTick
 ];
 
 #[cfg_attr(
@@ -60,7 +62,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
 )]
 // used Ensures that the symbol is kept until the final binary
 #[cfg_attr(all(target_arch = "arm", target_os = "none"), used)]
-pub static IRQS: [unsafe extern "C" fn(); 32] = [generic_isr; 32];
+pub static IRQS: [unsafe extern "C" fn(); 32] = [CortexM4F::GENERIC_ISR; 32];
 
 // The Patch table.
 //
@@ -74,8 +76,12 @@ pub static IRQS: [unsafe extern "C" fn(); 32] = [generic_isr; 32];
 #[cfg_attr(all(target_arch = "arm", target_os = "none"), used)]
 pub static PATCH: [unsafe extern "C" fn(); 16] = [unhandled_interrupt; 16];
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+// The SVC call in this function means that we need to ensure it's inlined in
+// `main()` otherwise we end up with a clobbered stack.
+#[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
+#[inline(always)]
 pub unsafe fn init() {
+    use core::arch::asm;
     let cache_ctrl = crate::cachectrl::CacheCtrl::new();
     cache_ctrl.enable_cache();
 
@@ -93,13 +99,13 @@ pub unsafe fn init() {
     // This ensures the FPU is actually disabled
     asm!("svc 0xff", out("r0") _, out("r1") _, out("r2") _, out("r3") _, out("r12") _);
 
-    cortexm4::nvic::disable_all();
-    cortexm4::nvic::clear_all_pending();
-    cortexm4::nvic::enable_all();
+    cortexm4f::nvic::disable_all();
+    cortexm4f::nvic::clear_all_pending();
+    cortexm4f::nvic::enable_all();
 }
 
 // Mock implementation for tests
-#[cfg(not(any(target_arch = "arm", target_os = "none")))]
+#[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
 pub unsafe fn init() {
     // Prevent unused code warning.
     scb::disable_fpca();

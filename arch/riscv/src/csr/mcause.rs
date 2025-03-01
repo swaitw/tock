@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use kernel::utilities::registers::{register_bitfields, LocalRegisterCopy};
 
 register_bitfields![usize,
@@ -5,13 +9,6 @@ register_bitfields![usize,
         is_interrupt OFFSET(crate::XLEN - 1) NUMBITS(1) [],
         reason OFFSET(0) NUMBITS(crate::XLEN - 1) []
     ],
-    // Per the spec, implementations are allowed to use the higher bits of the
-    // interrupt/exception reason for their own purposes.  For regular parsing,
-    // we only concern ourselves with the "standard" values.
-    reason [
-        reserved OFFSET(4) NUMBITS(crate::XLEN - 5) [],
-        std OFFSET(0) NUMBITS(4) []
-    ]
 ];
 
 /// Trap Cause
@@ -49,7 +46,7 @@ pub enum Interrupt {
     UserExternal,
     SupervisorExternal,
     MachineExternal,
-    Unknown,
+    Unknown(usize),
 }
 
 /// Exception
@@ -74,8 +71,8 @@ pub enum Exception {
 
 impl Interrupt {
     fn from_reason(val: usize) -> Self {
-        let reason = LocalRegisterCopy::<usize, reason::Register>::new(val);
-        match reason.read(reason::std) {
+        let mcause = LocalRegisterCopy::<usize, mcause::Register>::new(val);
+        match mcause.read(mcause::reason) {
             0 => Interrupt::UserSoft,
             1 => Interrupt::SupervisorSoft,
             3 => Interrupt::MachineSoft,
@@ -85,15 +82,15 @@ impl Interrupt {
             8 => Interrupt::UserExternal,
             9 => Interrupt::SupervisorExternal,
             11 => Interrupt::MachineExternal,
-            _ => Interrupt::Unknown,
+            val => Interrupt::Unknown(val),
         }
     }
 }
 
 impl Exception {
     fn from_reason(val: usize) -> Self {
-        let reason = LocalRegisterCopy::<usize, reason::Register>::new(val);
-        match reason.read(reason::std) {
+        let mcause = LocalRegisterCopy::<usize, mcause::Register>::new(val);
+        match mcause.read(mcause::reason) {
             0 => Exception::InstructionMisaligned,
             1 => Exception::InstructionFault,
             2 => Exception::IllegalInstruction,

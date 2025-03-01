@@ -90,22 +90,16 @@ struct Registers {
 }
 ```
 
-By default, `std` unit tests for the struct are generated as well (that is,
-tests attributed with `#[test]`). The unit tests make sure that the offsets and
-padding are consistent with the actual fields in the struct, and that alignment
-is correct.
+This crate will generate additional, compile time (`const`) assertions
+to validate various invariants of the register structs, such as
 
-Since those tests would break compilation in `custom-test-frameworks`
-environments, it is possible to opt out of the test generation. To do
-so, disable the default feature set containing the `std_unit_tests`
-feature:
+- proper start offset of padding fields,
+- proper start and end offsets of actual fields,
+- invalid alignment of field types,
+- the `@END` marker matching the size of the struct.
 
-```toml
-[dependencies.tock-registers]
-version = "0.4.x"
-default-features = false
-features = ["register_types"]
-```
+For more information on the generated assertions, check out the [`test_fields!`
+macro documentation](https://docs.tockos.org/tock_registers/macro.test_fields.html).
 
 By default, the visibility of the generated structs and fields is private. You
 can make them public using the `pub` keyword, just before the struct name or the
@@ -185,6 +179,8 @@ register_bitfields! [
     // In a simple case, offset can just be a number, and the number of bits
     // is set to 1:
     InterruptFlags [
+        // This is equivalent to writing
+        // UNDES OFFSET(10) NUMBITS(1) [],
         UNDES   10,
         TXEMPTY  9,
         NSSR     8,
@@ -195,6 +191,67 @@ register_bitfields! [
     ]
 ]
 ```
+
+This generates the modules `Control`, `Status`, and `InterruptFlags`
+    
+```rust
+
+mod Control {
+    pub struct Register;
+    pub const MODE: Field<u8, Register> = Field::<u8, Register>::new(0b111, 0);
+    pub const ENABLE: Field<u8, Register> = Field::<u8, Register>::new(0b1, 3);
+
+    pub mod MODE {
+        use super::{FieldValue, Register};
+        pub const Mode0: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b111, 0, 0);
+        pub const Mode1: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b111, 0, 1);
+        pub const Mode2: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b111, 0, 2);
+        pub const Mode3: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b111, 0, 3);
+        pub const SET: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b111, 0, 0b111);
+        pub const CLEAR: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b111, 0, 0);
+
+        #[repr(u8)]
+        pub enum Value { Mode0 = 0, Mode1 = 1, Mode2 = 2, Mode3 = 3 }
+        impl TryFromValue<u8> for Value {
+            fn try_from(v: u8) -> Option<Self> {
+                match v {
+                    0 => Some(Value::Mode0),
+                    1 => Some(Value::Mode1),
+                    2 => Some(Value::Mode2),
+                    3 => Some(Value::Mode3),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    pub mod ENABLE {
+        use super::{FieldValue, Register};
+        pub const Disabled: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b1, 3, 0);
+        pub const Enabled: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b1, 3, 1);
+        pub const SET: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b1, 3, 1);
+        pub const CLEAR: FieldValue<u8, Register> = FieldValue::<u8, Register>::new(0b1, 3, 0);
+
+        #[repr(u8)]
+        pub enum Value { Disabled = 0, Enabled = 1 }
+        impl TryFromValue<u8> for Value {
+            fn try_from(v: u8) -> Option<Self> {
+                match v {
+                    0 => Some(Value::Disabled),
+                    1 => Some(Value::Enabled),
+                    _ => None,
+                }
+            }
+        }
+    }
+}   
+```
+
+The macro generates a module for each register (e.g., Control, Status, InterruptFlags) that includes:
+- A `Register` struct for each register, which acts as a placeholder for the register type.
+- `Field`s within the register are defined as constants, such as `RANGE`, `EN`, and `INT` for the `Control` register.
+- Each field is represented by the `Field` type, which encapsulates the bit offset and width.
+
 
 ## Register Interface Summary
 
@@ -209,8 +266,9 @@ ReadOnly<T: UIntLike, R: RegisterLongName = ()>: Readable
 .read(field: Field<T, R>) -> T                 // Read the value of the given field
 .read_as_enum<E>(field: Field<T, R>) -> Option<E> // Read value of the given field as a enum member
 .is_set(field: Field<T, R>) -> bool            // Check if one or more bits in a field are set
-.matches_any(value: FieldValue<T, R>) -> bool  // Check if any specified parts of a field match
+.any_matching_bits_set(value: FieldValue<T, R>) -> bool  // Check if any bits corresponding to the mask in the passed field are set
 .matches_all(value: FieldValue<T, R>) -> bool  // Check if all specified parts of a field match
+.matches_any(&self, fields: &[FieldValue<T, R>]) -> bool // Check if any specified parts of a field match
 .extract() -> LocalRegisterCopy<T, R>          // Make local copy of register
 
 WriteOnly<T: UIntLike, R: RegisterLongName = ()>: Writeable
@@ -230,8 +288,9 @@ ReadWrite<T: UIntLike, R: RegisterLongName = ()>: Readable + Writeable + ReadWri
       original: LocalRegisterCopy<T, R>,       //  leaving other fields unchanged, but pass in
       value: FieldValue<T, R>)                 //  the original value, instead of doing a register read
 .is_set(field: Field<T, R>) -> bool            // Check if one or more bits in a field are set
-.matches_any(value: FieldValue<T, R>) -> bool  // Check if any specified parts of a field match
+.any_matching_bits_set(value: FieldValue<T, R>) -> bool  // Check if any bits corresponding to the mask in the passed field are set
 .matches_all(value: FieldValue<T, R>) -> bool  // Check if all specified parts of a field match
+.matches_any(&self, fields: &[FieldValue<T, R>]) -> bool // Check if any specified parts of a field match
 .extract() -> LocalRegisterCopy<T, R>          // Make local copy of register
 
 Aliased<T: UIntLike, R: RegisterLongName = (), W: RegisterLongName = ()>: Readable + Writeable
@@ -242,8 +301,9 @@ Aliased<T: UIntLike, R: RegisterLongName = (), W: RegisterLongName = ()>: Readab
 .write(value: FieldValue<T, W>)                // Write the value of one or more fields,
                                                //  overwriting other fields to zero
 .is_set(field: Field<T, R>) -> bool            // Check if one or more bits in a field are set
-.matches_any(value: FieldValue<T, R>) -> bool  // Check if any specified parts of a field match
+.any_matching_bits_set(value: FieldValue<T, R>) -> bool  // Check if any bits corresponding to the mask in the passed field are set
 .matches_all(value: FieldValue<T, R>) -> bool  // Check if all specified parts of a field match
+.matches_any(&self, fields: &[FieldValue<T, R>]) -> bool // Check if any specified parts of a field match
 .extract() -> LocalRegisterCopy<T, R>          // Make local copy of register
 ```
 
@@ -300,6 +360,9 @@ registers.cr.modify(Control::RANGE.val(2)); // Leaves EN, INT unchanged
 // Named constants can be used instead of the raw values:
 registers.cr.modify(Control::RANGE::VeryHigh);
 
+// Enum values can also be used:
+registers.cr.modify(Control::RANGE::Value::VeryHigh.into())
+
 // Another example of writing a field with a raw value:
 registers.cr.modify(Control::EN.val(0)); // Leaves RANGE, INT unchanged
 
@@ -338,7 +401,8 @@ let txcomplete: bool = registers.s.is_set(Status::TXCOMPLETE);
 // MATCHING
 // -----------------------------------------------------------------------------
 
-// You can also query a specific register state easily with `matches_[any|all]`:
+// You can also query a specific register state easily with `matches_all` or
+// `any_matching_bits_set` or `matches_any`:
 
 // Doesn't care about the state of any field except TXCOMPLETE and MODE:
 let ready: bool = registers.s.matches_all(Status::TXCOMPLETE:SET +
@@ -350,14 +414,23 @@ while !registers.s.matches_all(Status::TXCOMPLETE::SET +
                           Status::TXINTERRUPT::CLEAR) {}
 
 // Or for checking whether any interrupts are enabled:
-let any_ints = registers.s.matches_any(Status::TXINTERRUPT + Status::RXINTERRUPT);
+let any_ints = registers.s.any_matching_bits_set(Status::TXINTERRUPT + Status::RXINTERRUPT);
+
+// Or for checking whether any completion states are cleared:
+let any_cleared = registers.s.matches_any(&[Status::TXCOMPLETE::CLEAR, Status::RXCOMPLETE::CLEAR]);
+
+// Or for checking if a multi-bit field matches one of several modes:
+let sub_word_size = registers.s.matches_any(&[Size::Halfword, Size::Word]);
+
+// Or for checking if any of several fields exactly match in the register:
+let not_supported_mode = registers.s.matches_any(&[Status::Mode::HalfDuplex, Status::Mode::VARSYNC, Status::MODE::NOPARITY]);
 
 // Also you can read a register with set of enumerated values as a enum and `match` over it:
 let mode = registers.cr.read_as_enum(Status::MODE);
 
 match mode {
-    Some(Status::MODE::FullDuplex) => { /* ... */ }
-    Some(Status::MODE::HalfDuplex) => { /* ... */ }
+    Some(Status::MODE::Value::FullDuplex) => { /* ... */ }
+    Some(Status::MODE::Value::HalfDuplex) => { /* ... */ }
 
     None => unreachable!("invalid value")
 }
@@ -457,6 +530,43 @@ register_bitfields! [
     ]
 ]
 ```
+
+## Debug trait
+
+By default, if you print the value of a register, you will get the raw value as a number.
+
+How ever, you can use the `debug` method to get a more human readable output.
+
+This is implemented in `LocalRegisterCopy` and in using `Debuggable` registers which is auto implemented with `Readable`.
+
+Example:
+
+```rust
+// Create a copy of the register value as a local variable.
+let local = registers.cr.extract();
+
+println!("cr: {:#?}", local.debug());
+```
+
+For example, if the value of the `Control` register is `0b0000_0100`, the output will be:
+
+```rust
+cr: Control {
+    RANGE: VeryHigh,
+    EN: 0,
+    INT: 1
+}
+```
+
+Similarly it works directly on the register:
+
+```rust
+// require `Debuggable` trait
+use tock_registers::interfaces::Debuggable;
+
+println!("cr: {:#?}", registers.cr.debug());
+```
+> Do note this will issue a read to the register once.
 
 ## Implementing custom register types
 
