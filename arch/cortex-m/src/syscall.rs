@@ -1,9 +1,18 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Implementation of the architecture-specific portions of the kernel-userland
 //! system call interface.
 
 use core::fmt::Write;
-use core::mem;
-use core::ptr::{read_volatile, write_volatile};
+use core::marker::PhantomData;
+use core::mem::{self, size_of};
+use core::ops::Range;
+use core::ptr::{self, addr_of, addr_of_mut, read_volatile, write_volatile};
+use kernel::errorcode::ErrorCode;
+
+use crate::CortexMVariant;
 
 /// This is used in the syscall handler. When set to 1 this means the
 /// svc_handler was called. Marked `pub` because it is used in the cortex-m*
@@ -22,17 +31,14 @@ pub static mut SYSCALL_FIRED: usize = 0;
 #[used]
 pub static mut APP_HARD_FAULT: usize = 0;
 
-/// This is used in the hardfault handler. When an app faults, the hardfault
-/// handler stores the value of the SCB registers in this static array. This
-/// makes them available to be displayed in a diagnostic fault message.
+/// This is used in the hardfault handler.
+///
+/// When an app faults, the hardfault handler stores the value of the
+/// SCB registers in this static array. This makes them available to
+/// be displayed in a diagnostic fault message.
 #[no_mangle]
 #[used]
 pub static mut SCB_REGISTERS: [u32; 5] = [0; 5];
-
-#[allow(improper_ctypes)]
-extern "C" {
-    pub fn switch_to_user(user_stack: *const usize, process_regs: &mut [usize; 8]) -> *const usize;
-}
 
 // Space for 8 u32s: r0-r3, r12, lr, pc, and xPSR
 const SVC_FRAME_SIZE: usize = 32;
@@ -47,17 +53,77 @@ pub struct CortexMStoredState {
     psp: usize,
 }
 
-/// Implementation of the `UserspaceKernelBoundary` for the Cortex-M non-floating point
-/// architecture.
-pub struct SysCall();
+/// Values for encoding the stored state buffer in a binary slice.
+const VERSION: usize = 1;
+const STORED_STATE_SIZE: usize = size_of::<CortexMStoredState>();
+const TAG: [u8; 4] = [b'c', b't', b'x', b'm'];
+const METADATA_LEN: usize = 3;
 
-impl SysCall {
-    pub const unsafe fn new() -> SysCall {
-        SysCall()
+const VERSION_IDX: usize = 0;
+const SIZE_IDX: usize = 1;
+const TAG_IDX: usize = 2;
+const YIELDPC_IDX: usize = 3;
+const PSR_IDX: usize = 4;
+const PSP_IDX: usize = 5;
+const REGS_IDX: usize = 6;
+const REGS_RANGE: Range<usize> = REGS_IDX..REGS_IDX + 8;
+
+const USIZE_SZ: usize = size_of::<usize>();
+fn usize_byte_range(index: usize) -> Range<usize> {
+    index * USIZE_SZ..(index + 1) * USIZE_SZ
+}
+
+fn usize_from_u8_slice(slice: &[u8], index: usize) -> Result<usize, ErrorCode> {
+    let range = usize_byte_range(index);
+    Ok(usize::from_le_bytes(
+        slice
+            .get(range)
+            .ok_or(ErrorCode::SIZE)?
+            .try_into()
+            .or(Err(ErrorCode::FAIL))?,
+    ))
+}
+
+fn write_usize_to_u8_slice(val: usize, slice: &mut [u8], index: usize) {
+    let range = usize_byte_range(index);
+    slice[range].copy_from_slice(&val.to_le_bytes());
+}
+
+impl core::convert::TryFrom<&[u8]> for CortexMStoredState {
+    type Error = ErrorCode;
+    fn try_from(ss: &[u8]) -> Result<CortexMStoredState, Self::Error> {
+        if ss.len() == size_of::<CortexMStoredState>() + METADATA_LEN * USIZE_SZ
+            && usize_from_u8_slice(ss, VERSION_IDX)? == VERSION
+            && usize_from_u8_slice(ss, SIZE_IDX)? == STORED_STATE_SIZE
+            && usize_from_u8_slice(ss, TAG_IDX)? == u32::from_le_bytes(TAG) as usize
+        {
+            let mut res = CortexMStoredState {
+                regs: [0; 8],
+                yield_pc: usize_from_u8_slice(ss, YIELDPC_IDX)?,
+                psr: usize_from_u8_slice(ss, PSR_IDX)?,
+                psp: usize_from_u8_slice(ss, PSP_IDX)?,
+            };
+            for (i, v) in (REGS_RANGE).enumerate() {
+                res.regs[i] = usize_from_u8_slice(ss, v)?;
+            }
+            Ok(res)
+        } else {
+            Err(ErrorCode::FAIL)
+        }
     }
 }
 
-impl kernel::syscall::UserspaceKernelBoundary for SysCall {
+/// Implementation of the `UserspaceKernelBoundary` for the Cortex-M non-floating point
+/// architecture.
+pub struct SysCall<A: CortexMVariant>(PhantomData<A>);
+
+impl<A: CortexMVariant> SysCall<A> {
+    pub const unsafe fn new() -> SysCall<A> {
+        SysCall(PhantomData)
+    }
+}
+
+impl<A: CortexMVariant> kernel::syscall::UserspaceKernelBoundary for SysCall<A> {
     type StoredState = CortexMStoredState;
 
     fn initial_process_app_brk_size(&self) -> usize {
@@ -131,7 +197,15 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         //
         // Refer to
         // https://doc.rust-lang.org/std/primitive.pointer.html#safety-13
-        return_value.encode_syscall_return(&mut *r0, &mut *r1, &mut *r2, &mut *r3);
+        kernel::utilities::arch_helpers::encode_syscall_return_trd104(
+            &kernel::utilities::arch_helpers::TRD104SyscallReturn::from_syscall_return(
+                return_value,
+            ),
+            &mut *r0,
+            &mut *r1,
+            &mut *r2,
+            &mut *r3,
+        );
 
         Ok(())
     }
@@ -167,13 +241,13 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         //  - Instruction addresses require `|1` to indicate thumb code
         //  - Stack offset 4 is R12, which the syscall interface ignores
         let stack_bottom = state.psp as *mut usize;
-        write_volatile(stack_bottom.offset(7), state.psr); //......... -> APSR
-        write_volatile(stack_bottom.offset(6), callback.pc | 1); //... -> PC
-        write_volatile(stack_bottom.offset(5), state.yield_pc | 1); // -> LR
-        write_volatile(stack_bottom.offset(3), callback.argument3); // -> R3
-        write_volatile(stack_bottom.offset(2), callback.argument2); // -> R2
-        write_volatile(stack_bottom.offset(1), callback.argument1); // -> R1
-        write_volatile(stack_bottom.offset(0), callback.argument0); // -> R0
+        ptr::write(stack_bottom.offset(7), state.psr); //......... -> APSR
+        ptr::write(stack_bottom.offset(6), callback.pc.addr() | 1); //... -> PC
+        ptr::write(stack_bottom.offset(5), state.yield_pc | 1); // -> LR
+        ptr::write(stack_bottom.offset(3), callback.argument3.as_usize()); // -> R3
+        ptr::write(stack_bottom.offset(2), callback.argument2); // -> R2
+        ptr::write(stack_bottom.offset(1), callback.argument1); // -> R1
+        ptr::write(stack_bottom.offset(0), callback.argument0); // -> R0
 
         Ok(())
     }
@@ -184,7 +258,7 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         app_brk: *const u8,
         state: &mut CortexMStoredState,
     ) -> (kernel::syscall::ContextSwitchReason, Option<*const u8>) {
-        let new_stack_pointer = switch_to_user(state.psp as *const usize, &mut state.regs);
+        let new_stack_pointer = A::switch_to_user(state.psp as *const usize, &mut state.regs);
 
         // We need to keep track of the current stack pointer.
         state.psp = new_stack_pointer as usize;
@@ -200,13 +274,13 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
 
         // Check to see if the fault handler was called while the process was
         // running.
-        let app_fault = read_volatile(&APP_HARD_FAULT);
-        write_volatile(&mut APP_HARD_FAULT, 0);
+        let app_fault = read_volatile(&*addr_of!(APP_HARD_FAULT));
+        write_volatile(&mut *addr_of_mut!(APP_HARD_FAULT), 0);
 
         // Check to see if the svc_handler was called and the process called a
         // syscall.
-        let syscall_fired = read_volatile(&SYSCALL_FIRED);
-        write_volatile(&mut SYSCALL_FIRED, 0);
+        let syscall_fired = read_volatile(&*addr_of!(SYSCALL_FIRED));
+        write_volatile(&mut *addr_of_mut!(SYSCALL_FIRED), 0);
 
         // Now decide the reason based on which flags were set.
         let switch_reason = if app_fault == 1 || invalid_stack_pointer {
@@ -218,26 +292,31 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
             // syscall (i.e. we return a value to the app immediately) then this
             // will have no effect. If we are doing something like `yield()`,
             // however, then we need to have this state.
-            state.yield_pc = read_volatile(new_stack_pointer.offset(6));
-            state.psr = read_volatile(new_stack_pointer.offset(7));
+            state.yield_pc = ptr::read(new_stack_pointer.offset(6));
+            state.psr = ptr::read(new_stack_pointer.offset(7));
 
             // Get the syscall arguments and return them along with the syscall.
             // It's possible the app did something invalid, in which case we put
             // the app in the fault state.
-            let r0 = read_volatile(new_stack_pointer.offset(0));
-            let r1 = read_volatile(new_stack_pointer.offset(1));
-            let r2 = read_volatile(new_stack_pointer.offset(2));
-            let r3 = read_volatile(new_stack_pointer.offset(3));
+            let r0 = ptr::read(new_stack_pointer.offset(0));
+            let r1 = ptr::read(new_stack_pointer.offset(1));
+            let r2 = ptr::read(new_stack_pointer.offset(2));
+            let r3 = ptr::read(new_stack_pointer.offset(3));
 
             // Get the actual SVC number.
-            let pcptr = read_volatile((new_stack_pointer as *const *const u16).offset(6));
-            let svc_instr = read_volatile(pcptr.offset(-1));
+            let pcptr = ptr::read((new_stack_pointer as *const *const u16).offset(6));
+            let svc_instr = ptr::read(pcptr.offset(-1));
             let svc_num = (svc_instr & 0xff) as u8;
 
             // Use the helper function to convert these raw values into a Tock
             // `Syscall` type.
-            let syscall =
-                kernel::syscall::Syscall::from_register_arguments(svc_num, r0, r1, r2, r3);
+            let syscall = kernel::syscall::Syscall::from_register_arguments(
+                svc_num,
+                r0,
+                r1.into(),
+                r2.into(),
+                r3.into(),
+            );
 
             match syscall {
                 Some(s) => kernel::syscall::ContextSwitchReason::SyscallFired { syscall: s },
@@ -275,14 +354,14 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
                 0xBAD00BAD,
             )
         } else {
-            let r0 = read_volatile(stack_pointer.offset(0));
-            let r1 = read_volatile(stack_pointer.offset(1));
-            let r2 = read_volatile(stack_pointer.offset(2));
-            let r3 = read_volatile(stack_pointer.offset(3));
-            let r12 = read_volatile(stack_pointer.offset(4));
-            let lr = read_volatile(stack_pointer.offset(5));
-            let pc = read_volatile(stack_pointer.offset(6));
-            let xpsr = read_volatile(stack_pointer.offset(7));
+            let r0 = ptr::read(stack_pointer.offset(0));
+            let r1 = ptr::read(stack_pointer.offset(1));
+            let r2 = ptr::read(stack_pointer.offset(2));
+            let r3 = ptr::read(stack_pointer.offset(3));
+            let r12 = ptr::read(stack_pointer.offset(4));
+            let lr = ptr::read(stack_pointer.offset(5));
+            let pc = ptr::read(stack_pointer.offset(6));
+            let xpsr = ptr::read(stack_pointer.offset(7));
             (r0, r1, r2, r3, r12, lr, pc, xpsr)
         };
 
@@ -346,5 +425,27 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
                 "!!ERROR - Cortex M Thumb only!"
             },
         ));
+    }
+
+    fn store_context(
+        &self,
+        state: &CortexMStoredState,
+        out: &mut [u8],
+    ) -> Result<usize, ErrorCode> {
+        if out.len() >= size_of::<CortexMStoredState>() + 3 * USIZE_SZ {
+            write_usize_to_u8_slice(VERSION, out, VERSION_IDX);
+            write_usize_to_u8_slice(STORED_STATE_SIZE, out, SIZE_IDX);
+            write_usize_to_u8_slice(u32::from_le_bytes(TAG) as usize, out, TAG_IDX);
+            write_usize_to_u8_slice(state.yield_pc, out, YIELDPC_IDX);
+            write_usize_to_u8_slice(state.psr, out, PSR_IDX);
+            write_usize_to_u8_slice(state.psp, out, PSP_IDX);
+            for (i, v) in state.regs.iter().enumerate() {
+                write_usize_to_u8_slice(*v, out, REGS_IDX + i);
+            }
+            // + 3 for yield_pc, psr, psp
+            Ok((state.regs.len() + 3 + METADATA_LEN) * USIZE_SZ)
+        } else {
+            Err(ErrorCode::SIZE)
+        }
     }
 }

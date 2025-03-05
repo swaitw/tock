@@ -2,6 +2,67 @@
 
 ## master
 
+## v0.9
+
+There is a small breaking change, described below, which addresses semantic
+confusion around `matches_any()`. The interface has changed, so this should
+result in compile-time awareness rather than any silent behavioral changes.
+
+### **Breaking Changes**
+
+https://github.com/tock/tock/pull/3336
+480ee65139f1e51c149236a1b3e47cd61832ac80
+Rename matches_any() to any_matching_bits_set(), implement matches_any()
+
+> The current implementation of matches_any() does not implement the
+> functionality the name implies. This commit renames the existing
+> implementation to a name which better describes its functionality,
+> and introduces a new matches_any() function (with a different interface)
+> that actually correctly implements the functionality suggested by the
+> name. This commit also adds several tests to the tock-registers test
+> suite to verify the new version works as expected, and removes a feature
+> gate on a feature that no longer exists for the crate which was
+> preventing some of the tock-registers teste suite from being run as part
+> of `cargo test`.
+
+### Other changes:
+
+ - #3687: derive `Debug` on `Value`
+ - #3582: Update rust-toolchain to nightly of 2023-07-30
+
+## v0.8.1
+
+A point release to allow multiple invocations of `register_fields!` in
+the same module. See the PR and linked Issue for details.
+
+ - #3230: don't encapsulate test_fields! tests in mod
+
+## v0.8
+
+`tock-registers` now supports stable Rust!
+
+There is a small breaking change, documented below, required to support
+Rust 2021 edition. Most of the remaining changes are improvements to the
+internal self-testing infrastructure and documentation. There are also
+some additions to `FieldValue` to improve ergonomics.
+
+### **Breaking Changes**
+
+ - #2842: tock-registers: rename TryFromValue::try_from to try_from_value
+ - #2838: Update to Rust 2021 edition
+
+### Other Changes
+
+ - #3126: [trivial] tock-registers: mark two methods as `const`
+ - #3088: tock_registers/test_fields: respect struct size padding w/ alignment
+ - #3072: Update Rust nightly version + Expose virtual-function-elimination
+     - libraries/tock-register-interface: Fixup register_structs documentation
+ - #2988: Remove const_fn_trait_bound feature and update nightly (Mar 2022)
+ - #3014: tock-registers: Implement From field enum value type for FieldValue
+ - #3013: tock-register-interface: Provide none method for FieldValue type
+ - #2916: tock-register-interface: improve read_as_enum documentation
+ - #2922: tock-register-interface: replace register tests by const assertions
+
 ## v0.7
 
  - #2642: Rename `IntLike` to `UIntLike` to match semantics

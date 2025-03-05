@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use core::cell::Cell;
 
 use kernel::hil;
@@ -238,10 +242,10 @@ pub struct I2C<'a> {
     master_client: OptionalCell<&'a dyn hil::i2c::I2CHwMasterClient>,
 
     buffer: TakeCell<'static, [u8]>,
-    tx_position: Cell<u8>,
-    rx_position: Cell<u8>,
-    tx_len: Cell<u8>,
-    rx_len: Cell<u8>,
+    tx_position: Cell<usize>,
+    rx_position: Cell<usize>,
+    tx_len: Cell<usize>,
+    rx_len: Cell<usize>,
 
     slave_address: Cell<u8>,
 
@@ -258,7 +262,7 @@ enum I2CStatus {
 }
 
 impl<'a> I2C<'a> {
-    const fn new(base_addr: StaticRef<I2CRegisters>, clock: I2CClock<'a>) -> Self {
+    fn new(base_addr: StaticRef<I2CRegisters>, clock: I2CClock<'a>) -> Self {
         Self {
             registers: base_addr,
             clock,
@@ -278,7 +282,7 @@ impl<'a> I2C<'a> {
         }
     }
 
-    pub const fn new_i2c1(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_i2c1(rcc: &'a rcc::Rcc) -> Self {
         Self::new(
             I2C1_BASE,
             I2CClock(rcc::PeripheralClock::new(
@@ -335,7 +339,7 @@ impl<'a> I2C<'a> {
             // send the next byte
             if self.buffer.is_some() && self.tx_position.get() < self.tx_len.get() {
                 self.buffer.map(|buf| {
-                    let byte = buf[self.tx_position.get() as usize];
+                    let byte = buf[self.tx_position.get()];
                     self.registers.txdr.write(TXDR::TXDATA.val(byte as u32));
                     self.tx_position.set(self.tx_position.get() + 1);
                 });
@@ -349,7 +353,7 @@ impl<'a> I2C<'a> {
             let byte = self.registers.rxdr.read(RXDR::RXDATA) as u8;
             if self.buffer.is_some() && self.rx_position.get() < self.rx_len.get() {
                 self.buffer.map(|buf| {
-                    buf[self.rx_position.get() as usize] = byte;
+                    buf[self.rx_position.get()] = byte;
                     self.rx_position.set(self.rx_position.get() + 1);
                 });
             }
@@ -471,8 +475,8 @@ impl<'a> I2C<'a> {
     }
 }
 
-impl i2c::I2CMaster for I2C<'_> {
-    fn set_master_client(&self, master_client: &'static dyn I2CHwMasterClient) {
+impl<'a> i2c::I2CMaster<'a> for I2C<'a> {
+    fn set_master_client(&self, master_client: &'a dyn I2CHwMasterClient) {
         self.master_client.replace(master_client);
     }
     fn enable(&self) {
@@ -485,8 +489,8 @@ impl i2c::I2CMaster for I2C<'_> {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (Error, &'static mut [u8])> {
         if self.status.get() == I2CStatus::Idle {
             self.reset();
@@ -506,7 +510,7 @@ impl i2c::I2CMaster for I2C<'_> {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (Error, &'static mut [u8])> {
         if self.status.get() == I2CStatus::Idle {
             self.reset();
@@ -525,7 +529,7 @@ impl i2c::I2CMaster for I2C<'_> {
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (Error, &'static mut [u8])> {
         if self.status.get() == I2CStatus::Idle {
             self.reset();

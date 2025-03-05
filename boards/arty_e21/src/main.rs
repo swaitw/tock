@@ -1,16 +1,21 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Board file for the SiFive E21 Bitstream running on the Arty FPGA
 
 #![no_std]
 // Disable this attribute when documenting, as a workaround for
 // https://github.com/rust-lang/rust/issues/62184.
 #![cfg_attr(not(doc), no_main)]
-#![feature(const_fn_trait_bound)]
+
+use core::ptr::{addr_of, addr_of_mut};
 
 use arty_e21_chip::chip::ArtyExxDefaultPeripherals;
-use capsules::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
+use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
+
 use kernel::capabilities;
 use kernel::component::Component;
-use kernel::dynamic_deferred_call::{DynamicDeferredCall, DynamicDeferredCallClientState};
 use kernel::hil;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
 use kernel::scheduler::priority::PrioritySched;
@@ -25,10 +30,10 @@ pub mod io;
 
 // Number of concurrent processes this platform supports.
 const NUM_PROCS: usize = 4;
-const NUM_UPCALLS_IPC: usize = NUM_PROCS + 1;
 
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 // Actual memory for holding the active process structures.
 static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
@@ -36,6 +41,8 @@ static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS]
 
 // Reference to the chip for panic dumps.
 static mut CHIP: Option<&'static arty_e21_chip::chip::ArtyExx<ArtyExxDefaultPeripherals>> = None;
+static mut PROCESS_PRINTER: Option<&'static capsules_system::process_printer::ProcessPrinterText> =
+    None;
 
 /// Dummy buffer that causes the linker to reserve enough space for the stack.
 #[no_mangle]
@@ -45,18 +52,18 @@ pub static mut STACK_MEMORY: [u8; 0x1000] = [0; 0x1000];
 /// A structure representing this platform that holds references to all
 /// capsules for this platform.
 struct ArtyE21 {
-    console: &'static capsules::console::Console<'static>,
-    gpio: &'static capsules::gpio::GPIO<'static, arty_e21_chip::gpio::GpioPin<'static>>,
-    alarm: &'static capsules::alarm::AlarmDriver<
+    console: &'static capsules_core::console::Console<'static>,
+    gpio: &'static capsules_core::gpio::GPIO<'static, arty_e21_chip::gpio::GpioPin<'static>>,
+    alarm: &'static capsules_core::alarm::AlarmDriver<
         'static,
-        VirtualMuxAlarm<'static, sifive::clint::Clint<'static>>,
+        VirtualMuxAlarm<'static, arty_e21_chip::chip::ArtyExxClint<'static>>,
     >,
-    led: &'static capsules::led::LedDriver<
+    led: &'static capsules_core::led::LedDriver<
         'static,
         hil::led::LedHigh<'static, arty_e21_chip::gpio::GpioPin<'static>>,
         3,
     >,
-    button: &'static capsules::button::Button<'static, arty_e21_chip::gpio::GpioPin<'static>>,
+    button: &'static capsules_core::button::Button<'static, arty_e21_chip::gpio::GpioPin<'static>>,
     // ipc: kernel::ipc::IPC<NUM_PROCS>,
     scheduler: &'static PrioritySched,
 }
@@ -68,12 +75,12 @@ impl SyscallDriverLookup for ArtyE21 {
         F: FnOnce(Option<&dyn kernel::syscall::SyscallDriver>) -> R,
     {
         match driver_num {
-            capsules::console::DRIVER_NUM => f(Some(self.console)),
-            capsules::gpio::DRIVER_NUM => f(Some(self.gpio)),
+            capsules_core::console::DRIVER_NUM => f(Some(self.console)),
+            capsules_core::gpio::DRIVER_NUM => f(Some(self.gpio)),
 
-            capsules::alarm::DRIVER_NUM => f(Some(self.alarm)),
-            capsules::led::DRIVER_NUM => f(Some(self.led)),
-            capsules::button::DRIVER_NUM => f(Some(self.button)),
+            capsules_core::alarm::DRIVER_NUM => f(Some(self.alarm)),
+            capsules_core::led::DRIVER_NUM => f(Some(self.led)),
+            capsules_core::button::DRIVER_NUM => f(Some(self.button)),
 
             // kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
             _ => f(None),
@@ -93,7 +100,7 @@ impl KernelResources<arty_e21_chip::chip::ArtyExx<'static, ArtyExxDefaultPeriphe
     type ContextSwitchCallback = ();
 
     fn syscall_driver_lookup(&self) -> &Self::SyscallDriverLookup {
-        &self
+        self
     }
     fn syscall_filter(&self) -> &Self::SyscallFilter {
         &()
@@ -115,13 +122,17 @@ impl KernelResources<arty_e21_chip::chip::ArtyExx<'static, ArtyExxDefaultPeriphe
     }
 }
 
-/// Main function.
-///
-/// This function is called from the arch crate after some very basic RISC-V
-/// and RAM setup.
-#[no_mangle]
-pub unsafe fn main() {
+/// This is in a separate, inline(never) function so that its stack frame is
+/// removed when this function returns. Otherwise, the stack space used for
+/// these static_inits is wasted.
+#[inline(never)]
+unsafe fn start() -> (
+    &'static kernel::Kernel,
+    ArtyE21,
+    &'static arty_e21_chip::chip::ArtyExx<'static, ArtyExxDefaultPeripherals<'static>>,
+) {
     let peripherals = static_init!(ArtyExxDefaultPeripherals, ArtyExxDefaultPeripherals::new());
+    peripherals.init();
 
     let chip = static_init!(
         arty_e21_chip::chip::ArtyExx<ArtyExxDefaultPeripherals>,
@@ -131,17 +142,8 @@ pub unsafe fn main() {
     chip.initialize();
 
     let process_mgmt_cap = create_capability!(capabilities::ProcessManagementCapability);
-    let main_loop_cap = create_capability!(capabilities::MainLoopCapability);
 
-    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&PROCESSES));
-
-    let dynamic_deferred_call_clients =
-        static_init!([DynamicDeferredCallClientState; 2], Default::default());
-    let dynamic_deferred_caller = static_init!(
-        DynamicDeferredCall,
-        DynamicDeferredCall::new(dynamic_deferred_call_clients)
-    );
-    DynamicDeferredCall::set_global_instance(dynamic_deferred_caller);
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&*addr_of!(PROCESSES)));
 
     // Configure kernel debug gpios as early as possible
     kernel::debug::assign_gpios(
@@ -150,25 +152,25 @@ pub unsafe fn main() {
         Some(&peripherals.gpio_port[8]),
     );
 
+    let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
+        .finalize(components::process_printer_text_component_static!());
+    PROCESS_PRINTER = Some(process_printer);
+
     // Create a shared UART channel for the console and for kernel debug.
-    let uart_mux = components::console::UartMuxComponent::new(
-        &peripherals.uart0,
-        115200,
-        dynamic_deferred_caller,
-    )
-    .finalize(());
+    let uart_mux = components::console::UartMuxComponent::new(&peripherals.uart0, 115200)
+        .finalize(components::uart_mux_component_static!());
 
     let console = components::console::ConsoleComponent::new(
         board_kernel,
-        capsules::console::DRIVER_NUM,
+        capsules_core::console::DRIVER_NUM,
         uart_mux,
     )
-    .finalize(());
+    .finalize(components::console_component_static!());
 
     // Create a shared virtualization mux layer on top of a single hardware
     // alarm.
     let mux_alarm = static_init!(
-        MuxAlarm<'static, sifive::clint::Clint>,
+        MuxAlarm<'static, arty_e21_chip::chip::ArtyExxClint>,
         MuxAlarm::new(&peripherals.machinetimer)
     );
     hil::time::Alarm::set_alarm_client(&peripherals.machinetimer, mux_alarm);
@@ -176,25 +178,27 @@ pub unsafe fn main() {
     // Alarm
     let alarm = components::alarm::AlarmDriverComponent::new(
         board_kernel,
-        capsules::alarm::DRIVER_NUM,
+        capsules_core::alarm::DRIVER_NUM,
         mux_alarm,
     )
-    .finalize(components::alarm_component_helper!(sifive::clint::Clint));
+    .finalize(components::alarm_component_static!(
+        arty_e21_chip::chip::ArtyExxClint
+    ));
 
     // TEST for timer
     //
     // let virtual_alarm_test = static_init!(
-    //     VirtualMuxAlarm<'static, sifive::clint::Clint>,
+    //     VirtualMuxAlarm<'static, arty_e21_chip::chip::ArtyExxClint>,
     //     VirtualMuxAlarm::new(mux_alarm)
     // );
     // let timertest = static_init!(
-    //     timer_test::TimerTest<'static, VirtualMuxAlarm<'static, sifive::clint::Clint>>,
+    //     timer_test::TimerTest<'static, VirtualMuxAlarm<'static, arty_e21_chip::chip::ArtyExxClint>>,
     //     timer_test::TimerTest::new(virtual_alarm_test)
     // );
     // virtual_alarm_test.set_client(timertest);
 
     // LEDs
-    let led = components::led::LedsComponent::new().finalize(components::led_component_helper!(
+    let led = components::led::LedsComponent::new().finalize(components::led_component_static!(
         hil::led::LedHigh<'static, arty_e21_chip::gpio::GpioPin>,
         hil::led::LedHigh::new(&peripherals.gpio_port[2]), // Red
         hil::led::LedHigh::new(&peripherals.gpio_port[1]), // Green
@@ -204,7 +208,7 @@ pub unsafe fn main() {
     // BUTTONs
     let button = components::button::ButtonComponent::new(
         board_kernel,
-        capsules::button::DRIVER_NUM,
+        capsules_core::button::DRIVER_NUM,
         components::button_component_helper!(
             arty_e21_chip::gpio::GpioPin,
             (
@@ -214,14 +218,14 @@ pub unsafe fn main() {
             )
         ),
     )
-    .finalize(components::button_component_buf!(
+    .finalize(components::button_component_static!(
         arty_e21_chip::gpio::GpioPin
     ));
 
     // set GPIO driver controlling remaining GPIO pins
     let gpio = components::gpio::GpioComponent::new(
         board_kernel,
-        capsules::gpio::DRIVER_NUM,
+        capsules_core::gpio::DRIVER_NUM,
         components::gpio_component_helper!(
             arty_e21_chip::gpio::GpioPin,
             0 => &peripherals.gpio_port[7],
@@ -229,26 +233,28 @@ pub unsafe fn main() {
             2 => &peripherals.gpio_port[6]
         ),
     )
-    .finalize(components::gpio_component_buf!(
+    .finalize(components::gpio_component_static!(
         arty_e21_chip::gpio::GpioPin
     ));
 
     chip.enable_all_interrupts();
 
-    let scheduler = components::sched::priority::PriorityComponent::new(board_kernel).finalize(());
+    let scheduler = components::sched::priority::PriorityComponent::new(board_kernel)
+        .finalize(components::priority_component_static!());
 
     let artye21 = ArtyE21 {
-        console: console,
-        gpio: gpio,
-        alarm: alarm,
-        led: led,
-        button: button,
+        console,
+        gpio,
+        alarm,
+        led,
+        button,
         // ipc: kernel::ipc::IPC::new(board_kernel),
         scheduler,
     };
 
     // Create virtual device for kernel debug.
-    components::debug_writer::DebugWriterComponent::new(uart_mux).finalize(());
+    components::debug_writer::DebugWriterComponent::new(uart_mux)
+        .finalize(components::debug_writer_component_static!());
 
     // arty_e21_chip::uart::UART0.initialize_gpio_pins(&peripherals.gpio_port[17], &peripherals.gpio_port[16]);
 
@@ -257,10 +263,10 @@ pub unsafe fn main() {
     // Uncomment to run tests
     //timertest.start();
     /*components::test::multi_alarm_test::MultiAlarmTestComponent::new(mux_alarm)
-    .finalize(components::multi_alarm_test_component_buf!(sifive::clint::Clint))
+    .finalize(components::multi_alarm_test_component_buf!(arty_e21_chip::chip::ArtyExxClint))
     .run();*/
 
-    /// These symbols are defined in the linker script.
+    // These symbols are defined in the linker script.
     extern "C" {
         /// Beginning of the ROM region containing app images.
         static _sapps: u8;
@@ -276,14 +282,14 @@ pub unsafe fn main() {
         board_kernel,
         chip,
         core::slice::from_raw_parts(
-            &_sapps as *const u8,
-            &_eapps as *const u8 as usize - &_sapps as *const u8 as usize,
+            core::ptr::addr_of!(_sapps),
+            core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
         ),
         core::slice::from_raw_parts_mut(
-            &mut _sappmem as *mut u8,
-            &_eappmem as *const u8 as usize - &_sappmem as *const u8 as usize,
+            core::ptr::addr_of_mut!(_sappmem),
+            core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
         ),
-        &mut PROCESSES,
+        &mut *addr_of_mut!(PROCESSES),
         &FAULT_RESPONSE,
         &process_mgmt_cap,
     )
@@ -292,10 +298,19 @@ pub unsafe fn main() {
         debug!("{:?}", err);
     });
 
+    (board_kernel, artye21, chip)
+}
+
+/// Main function called after RAM initialized.
+#[no_mangle]
+pub unsafe fn main() {
+    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
+
+    let (board_kernel, board, chip) = start();
     board_kernel.kernel_loop(
-        &artye21,
+        &board,
         chip,
-        None::<&kernel::ipc::IPC<NUM_PROCS, NUM_UPCALLS_IPC>>,
-        &main_loop_cap,
+        None::<&kernel::ipc::IPC<0>>,
+        &main_loop_capability,
     );
 }

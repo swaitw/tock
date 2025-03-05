@@ -1,29 +1,36 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! High-level setup and interrupt mapping for the chip.
 
 use core::fmt::Write;
-use kernel;
+use core::ptr::addr_of;
 use kernel::debug;
 use kernel::platform::chip::Chip;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use rv32i;
+use rv32i::csr;
 use rv32i::csr::{mcause, mie::mie, mip::mip, CSR};
-use rv32i::pmp::PMP;
+use rv32i::pmp::{simple::SimplePMP, PMPUserMPU};
 
-use crate::interrupts;
-use crate::plic::Plic;
 use crate::plic::PLIC;
+use kernel::hil::time::Freq32KHz;
 use kernel::platform::chip::InterruptService;
+use sifive::plic::Plic;
 
-pub struct E310x<'a, I: InterruptService<()> + 'a> {
+pub type E310xClint<'a> = sifive::clint::Clint<'a, Freq32KHz>;
+
+pub struct E310x<'a, I: InterruptService + 'a> {
     userspace_kernel_boundary: rv32i::syscall::SysCall,
-    pmp: PMP<4>,
+    pmp: PMPUserMPU<4, SimplePMP<8>>,
     plic: &'a Plic,
-    timer: &'a sifive::clint::Clint<'a>,
+    timer: &'a E310xClint<'a>,
     plic_interrupt_service: &'a I,
 }
 
 pub struct E310xDefaultPeripherals<'a> {
     pub uart0: sifive::uart::Uart<'a>,
+    pub uart1: sifive::uart::Uart<'a>,
     pub gpio_port: crate::gpio::Port<'a>,
     pub prci: sifive::prci::Prci,
     pub pwm0: sifive::pwm::Pwm,
@@ -33,10 +40,11 @@ pub struct E310xDefaultPeripherals<'a> {
     pub watchdog: sifive::watchdog::Watchdog,
 }
 
-impl<'a> E310xDefaultPeripherals<'a> {
-    pub fn new() -> Self {
+impl E310xDefaultPeripherals<'_> {
+    pub fn new(clock_frequency: u32) -> Self {
         Self {
-            uart0: sifive::uart::Uart::new(crate::uart::UART0_BASE, 16_000_000),
+            uart0: sifive::uart::Uart::new(crate::uart::UART0_BASE, clock_frequency),
+            uart1: sifive::uart::Uart::new(crate::uart::UART1_BASE, clock_frequency),
             gpio_port: crate::gpio::Port::new(),
             prci: sifive::prci::Prci::new(crate::prci::PRCI_BASE),
             pwm0: sifive::pwm::Pwm::new(crate::pwm::PWM0_BASE),
@@ -46,42 +54,50 @@ impl<'a> E310xDefaultPeripherals<'a> {
             watchdog: sifive::watchdog::Watchdog::new(crate::watchdog::WATCHDOG_BASE),
         }
     }
+
+    // Resolve any circular dependencies and register deferred calls
+    pub fn init(&'static self) {
+        kernel::deferred_call::DeferredCallClient::register(&self.uart0);
+        kernel::deferred_call::DeferredCallClient::register(&self.uart1);
+    }
 }
 
-impl<'a> InterruptService<()> for E310xDefaultPeripherals<'a> {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
-        match interrupt {
-            interrupts::UART0 => self.uart0.handle_interrupt(),
-            int_pin @ interrupts::GPIO0..=interrupts::GPIO31 => {
-                let pin = &self.gpio_port[(int_pin - interrupts::GPIO0) as usize];
-                pin.handle_interrupt();
-            }
-
-            _ => return false,
-        }
-        true
-    }
-
-    unsafe fn service_deferred_call(&self, _: ()) -> bool {
+impl InterruptService for E310xDefaultPeripherals<'_> {
+    unsafe fn service_interrupt(&self, _interrupt: u32) -> bool {
         false
     }
 }
 
-impl<'a, I: InterruptService<()> + 'a> E310x<'a, I> {
-    pub unsafe fn new(plic_interrupt_service: &'a I, timer: &'a sifive::clint::Clint<'a>) -> Self {
+impl<'a, I: InterruptService + 'a> E310x<'a, I> {
+    pub unsafe fn new(plic_interrupt_service: &'a I, timer: &'a E310xClint<'a>) -> Self {
         Self {
             userspace_kernel_boundary: rv32i::syscall::SysCall::new(),
-            pmp: PMP::new(),
-            plic: &PLIC,
+            pmp: PMPUserMPU::new(SimplePMP::new().unwrap()),
+            plic: &*addr_of!(PLIC),
             timer,
             plic_interrupt_service,
         }
     }
 
     pub unsafe fn enable_plic_interrupts(&self) {
-        self.plic.disable_all();
-        self.plic.clear_all_pending();
+        /* E31 core manual
+         * https://sifive.cdn.prismic.io/sifive/c29f9c69-5254-4f9a-9e18-24ea73f34e81_e31_core_complex_manual_21G2.pdf
+         * PLIC Chapter 9.4 p.114: A pending bit in the PLIC core can be cleared
+         * by setting the associated enable bit then performing a claim.
+         */
+
+        // first disable interrupts globally
+        let old_mie = csr::CSR
+            .mstatus
+            .read_and_clear_field(csr::mstatus::mstatus::mie);
+
         self.plic.enable_all();
+        self.plic.clear_all_pending();
+
+        // restore the old external interrupt enable bit
+        csr::CSR
+            .mstatus
+            .modify(csr::mstatus::mstatus::mie.val(old_mie));
     }
 
     unsafe fn handle_plic_interrupts(&self) {
@@ -96,8 +112,8 @@ impl<'a, I: InterruptService<()> + 'a> E310x<'a, I> {
     }
 }
 
-impl<'a, I: InterruptService<()> + 'a> kernel::platform::chip::Chip for E310x<'a, I> {
-    type MPU = PMP<4>;
+impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for E310x<'a, I> {
+    type MPU = PMPUserMPU<4, SimplePMP<8>>;
     type UserspaceKernelBoundary = rv32i::syscall::SysCall;
 
     fn mpu(&self) -> &Self::MPU {
@@ -121,7 +137,9 @@ impl<'a, I: InterruptService<()> + 'a> kernel::platform::chip::Chip for E310x<'a
                 }
             }
 
-            if !mip.matches_any(mip::mtimer::SET) && self.plic.get_saved_interrupts().is_none() {
+            if !mip.any_matching_bits_set(mip::mtimer::SET)
+                && self.plic.get_saved_interrupts().is_none()
+            {
                 break;
             }
         }
@@ -210,12 +228,12 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             // Once claimed this interrupt won't fire until it's completed
             // NOTE: The interrupt is no longer pending in the PLIC
             loop {
-                let interrupt = PLIC.next_pending();
+                let interrupt = (*addr_of!(PLIC)).next_pending();
 
                 match interrupt {
                     Some(irq) => {
                         // Safe as interrupts are disabled
-                        PLIC.save_interrupt(irq);
+                        (*addr_of!(PLIC)).save_interrupt(irq);
                     }
                     None => {
                         // Enable generic interrupts
@@ -227,7 +245,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             }
         }
 
-        mcause::Interrupt::Unknown => {
+        mcause::Interrupt::Unknown(_) => {
             panic!("interrupt of unknown cause");
         }
     }
@@ -250,6 +268,7 @@ pub unsafe extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]

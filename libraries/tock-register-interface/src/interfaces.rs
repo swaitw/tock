@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Interfaces (traits) to register types
 //!
 //! This module contains traits which reflect standardized interfaces
@@ -7,14 +11,14 @@
 //!
 //! Each trait has two associated type parameters, namely:
 //!
-//! - `T`: [`UIntLike`](crate::UIntLike), indicating the underlying
+//! - `T`: [`UIntLike`], indicating the underlying
 //!   integer type used to represent the register's raw contents.
 //!
-//! - `R`: [`RegisterLongName`](crate::RegisterLongName), functioning
+//! - `R`: [`RegisterLongName`], functioning
 //!   as a type to identify this register's descriptive name and
 //!   semantic meaning. It is further used to impose type constraints
 //!   on values passed through the API, such as
-//!   [`FieldValue`](crate::fields::FieldValue).
+//!   [`FieldValue`].
 //!
 //! Registers can have different access levels, which are mapped to
 //! different traits respectively:
@@ -35,7 +39,7 @@
 //!   writing and receive when reading.
 //!
 //!   If a type implements both [`Readable`] and [`Writeable`], and
-//!   the associated [`RegisterLongName`](crate::RegisterLongName)
+//!   the associated [`RegisterLongName`]
 //!   type parameters are identical, it will automatically implement
 //!   [`ReadWriteable`]. In particular, for
 //!   [`Aliased`](crate::registers::Aliased) this is -- in general --
@@ -50,8 +54,9 @@
 //!           DUMMY OFFSET(0) NUMBITS(1) [],
 //!       ],
 //!   ];
+//!   let mut register_memory: u8 = 0;
 //!   let read_write_reg: &ReadWrite<u8, A::Register> = unsafe {
-//!       core::mem::transmute(Box::leak(Box::new(0_u8)))
+//!       core::mem::transmute(&mut register_memory)
 //!   };
 //!   ReadWriteable::modify(read_write_reg, A::DUMMY::SET);
 //!   ```
@@ -75,6 +80,15 @@
 //!   };
 //!   ReadWriteable::modify(aliased_reg, A::DUMMY::SET);
 //!   ```
+//!
+//! - [`Debuggable`]: indicates that the register supports producing
+//!   human-readable debug output using the `RegisterDebugValue` type.
+//!   This type can be produced with the
+//!   [`debug`](crate::interfaces::Debuggable::debug) method.  This
+//!   will return a value that implements [`Debug`](core::fmt::Debug).
+//!   It is automticaly implemented for any register implementing
+//!   [`Readable`].
+//!
 //!
 //! ## Example: implementing a custom register type
 //!
@@ -173,8 +187,44 @@ pub trait Readable {
         field.read(self.get())
     }
 
-    #[inline]
     /// Set the raw register value
+    ///
+    /// The [`register_bitfields!`](crate::register_bitfields) macro will
+    /// generate an enum containing the various named field variants and
+    /// implementing the required [`TryFromValue`] trait. It is accessible as
+    /// `$REGISTER_NAME::$FIELD_NAME::Value`.
+    ///
+    /// This method can be useful to symbolically represent read register field
+    /// states throughout the codebase and to enforce exhaustive matches over
+    /// all defined valid register field values.
+    ///
+    /// ## Usage Example
+    ///
+    /// ```rust
+    /// # use tock_registers::interfaces::Readable;
+    /// # use tock_registers::registers::InMemoryRegister;
+    /// # use tock_registers::register_bitfields;
+    /// register_bitfields![u8,
+    ///     EXAMPLEREG [
+    ///         TESTFIELD OFFSET(0) NUMBITS(2) [
+    ///             Foo = 0,
+    ///             Bar = 1,
+    ///             Baz = 2,
+    ///         ],
+    ///     ],
+    /// ];
+    ///
+    /// let reg: InMemoryRegister<u8, EXAMPLEREG::Register> =
+    ///     InMemoryRegister::new(2);
+    ///
+    /// match reg.read_as_enum(EXAMPLEREG::TESTFIELD) {
+    ///     Some(EXAMPLEREG::TESTFIELD::Value::Foo) => "Tock",
+    ///     Some(EXAMPLEREG::TESTFIELD::Value::Bar) => "is",
+    ///     Some(EXAMPLEREG::TESTFIELD::Value::Baz) => "awesome!",
+    ///     None => panic!("boo!"),
+    /// };
+    /// ```
+    #[inline]
     fn read_as_enum<E: TryFromValue<Self::T, EnumType = E>>(
         &self,
         field: Field<Self::T, Self::R>,
@@ -194,10 +244,13 @@ pub trait Readable {
         field.is_set(self.get())
     }
 
+    /// Check if any bits corresponding to the mask in the passed `FieldValue` are set.
+    /// This function is identical to `is_set()` but operates on a `FieldValue` rather
+    /// than a `Field`, allowing for checking if any bits are set across multiple,
+    /// non-contiguous portions of a bitfield.
     #[inline]
-    /// Check if any specified parts of a field match
-    fn matches_any(&self, field: FieldValue<Self::T, Self::R>) -> bool {
-        field.matches_any(self.get())
+    fn any_matching_bits_set(&self, field: FieldValue<Self::T, Self::R>) -> bool {
+        field.any_matching_bits_set(self.get())
     }
 
     #[inline]
@@ -205,7 +258,45 @@ pub trait Readable {
     fn matches_all(&self, field: FieldValue<Self::T, Self::R>) -> bool {
         field.matches_all(self.get())
     }
+
+    /// Check if any of the passed parts of a field exactly match the contained
+    /// value. This allows for matching on unset bits, or matching on specific values
+    /// in multi-bit fields.
+    #[inline]
+    fn matches_any(&self, fields: &[FieldValue<Self::T, Self::R>]) -> bool {
+        fields
+            .iter()
+            .any(|field| self.get() & field.mask() == field.value)
+    }
 }
+
+/// [`Debuggable`] is a trait for registers that support human-readable debug
+/// output with [`core::fmt::Debug`].  It extends the [`Readable`] trait and
+/// doesn't require manual implementation.
+///
+/// This is implemented for the register when using the [`register_bitfields`] macro.
+///
+/// The `debug` method returns a value that implements [`core::fmt::Debug`].
+///
+/// [`register_bitfields`]: crate::register_bitfields
+pub trait Debuggable: Readable {
+    /// Returns a [`RegisterDebugValue`](crate::debug::RegisterDebugValue) that
+    /// implements [`core::fmt::Debug`], the debug information is extracted from
+    /// `<Register>::DebugInfo`.
+    #[inline]
+    fn debug(&self) -> crate::debug::RegisterDebugValue<Self::T, Self::R>
+    where
+        Self::R: crate::debug::RegisterDebugInfo<Self::T>,
+    {
+        crate::debug::RegisterDebugValue {
+            data: self.get(),
+            _reg: core::marker::PhantomData,
+        }
+    }
+}
+
+// pass Readable implementation to Debuggable
+impl<T: Readable> Debuggable for T {}
 
 /// Writeable register
 ///

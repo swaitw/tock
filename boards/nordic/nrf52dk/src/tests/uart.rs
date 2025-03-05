@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use kernel::hil::uart::Transmit;
 use kernel::static_init;
 use nrf52832::uart::Uarte;
@@ -17,7 +21,7 @@ const BUFFER_SIZE_2048: usize = 2048;
 ///
 pub unsafe fn run(uart: &'static Uarte) {
     // Note: you can only one of these tests at the time because
-    //  1. It will generate race-conitions in the UART because we don't have any checks against that
+    //  1. It will generate race-conditions in the UART because we don't have any checks against that
     //  2. `buf` can only be `borrowed` once and avoid allocate four different buffers
 
     let buf = static_init!([u8; BUFFER_SIZE_2048], [0; BUFFER_SIZE_2048]);

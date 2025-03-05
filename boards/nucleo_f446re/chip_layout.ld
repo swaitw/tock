@@ -1,3 +1,7 @@
+/* Licensed under the Apache License, Version 2.0 or the MIT License. */
+/* SPDX-License-Identifier: Apache-2.0 OR MIT                         */
+/* Copyright Tock Contributors 2023.                                  */
+
 /* Memory layout for the STM32F446RE
  * rom = 512KB (LENGTH = 0x00080000)
  * kernel = 256KB
@@ -11,5 +15,4 @@ MEMORY
   ram (rwx) : ORIGIN = 0x20000000, LENGTH = 0x00020000
 }
 
-MPU_MIN_ALIGN = 8K;
 PAGE_SIZE = 2K;

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright Tock Contributors 2023.
+
 # Post commit statuses to github indicating how a PR affects flash and RAM use for different boards.
 # This script is run by Travis after successful PR builds. It reports resource differences between
 # the target branch before and after merging in the PR.
 # This script also prints more detailed size analysis to the Travis build log.
 # This script only reports updates for boards whose size have changed as a result of the PR being
 # tested, and does not currently support analyzing size differences in RISC-V boards.
-# This file relies on a travis enviroment variable to post to github, which is the value of a
+# This file relies on a travis environment variable to post to github, which is the value of a
 # Github OAuth personal token associated with @hudson-ayers Github identity.
 
 set -e

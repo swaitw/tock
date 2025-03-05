@@ -1,121 +1,122 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Bus Components for Intel8080 Parallel Interface, I2C, SPI
 //!
 //! Example
 //!
 //! Intel 8080 Parallel Interface
 //!
-//! let bus = components::bus::Bus8080BusComponent::new().finalize(
-//!     components::bus8080_bus_component_helper!(
-//!         // bus type
-//!         stm32f412g::fsmc::Fsmc,
-//!         // bus
-//!         &stm32f412g::fsmc::FSMC
-//!     ),
+//! let bus = components::bus::Bus8080BusComponent::new(&stm32f412g::fsmc::FSMC).finalize(
+//!     components::bus8080_bus_component_static!(stm32f412g::fsmc::Fsmc)
 //! );
 //!
 //! SPI
 //!
 //! ```rust
-//! let bus = components::bus::SpiMasterBusComponent::new().finalize(
-//!     components::spi_bus_component_helper!(
-//!         // spi type
-//!         nrf52840::spi::SPIM,
-//!         // chip select
-//!         &nrf52840::gpio::PORT[GPIO_D4],
-//!         // spi mux
-//!         spi_mux
-//!     ),
+//! let bus = components::bus::SpiMasterBusComponent::new(spi_mux,
+//!                                                       chip_select,
+//!                                                       baud_rate,
+//!                                                       clock_phase,
+//!                                                       clock_polarity).finalize(
+//!     components::spi_bus_component_static!(nrf52840::spi::SPIM)
 //! );
 //! ```
-use capsules::bus::{Bus8080Bus, I2CMasterBus, SpiMasterBus};
-use capsules::virtual_i2c::{I2CDevice, MuxI2C};
-use capsules::virtual_spi::VirtualSpiMasterDevice;
-use core::marker::PhantomData;
+
+use capsules_core::virtualizers::virtual_i2c::{I2CDevice, MuxI2C};
+use capsules_core::virtualizers::virtual_spi::MuxSpiMaster;
+use capsules_core::virtualizers::virtual_spi::VirtualSpiMasterDevice;
+use capsules_extra::bus::{Bus8080Bus, I2CMasterBus, SpiMasterBus};
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::bus8080;
+use kernel::hil::i2c;
 use kernel::hil::spi::{self, ClockPhase, ClockPolarity, SpiMasterDevice};
-use kernel::static_init_half;
 
 // Setup static space for the objects.
 #[macro_export]
-macro_rules! bus8080_bus_component_helper {
-    ($B:ty, $bus8080:expr $(,)?) => {{
-        use capsules::bus::Bus8080Bus;
-        use core::mem::{size_of, MaybeUninit};
-        static mut bus: MaybeUninit<Bus8080Bus<'static, $B>> = MaybeUninit::uninit();
-        ($bus8080, &mut bus)
+macro_rules! bus8080_bus_component_static {
+    ($B:ty $(,)?) => {{
+        kernel::static_buf!(capsules_extra::bus::Bus8080Bus<'static, $B>)
     };};
 }
 
 #[macro_export]
-macro_rules! spi_bus_component_helper {
-    ($S:ty, $select:expr, $spi_mux:expr $(,)?) => {{
-        use capsules::bus::SpiMasterBus;
-        use capsules::virtual_spi::VirtualSpiMasterDevice;
-        use core::mem::{size_of, MaybeUninit};
-        let bus_spi: &'static VirtualSpiMasterDevice<'static, $S> =
-            components::spi::SpiComponent::new($spi_mux, $select)
-                .finalize(components::spi_component_helper!($S));
-        static mut ADDRESS_BUFFER: [u8; size_of::<usize>()] = [0; size_of::<usize>()];
-        static mut bus: MaybeUninit<SpiMasterBus<'static, VirtualSpiMasterDevice<'static, $S>>> =
-            MaybeUninit::uninit();
-        (&bus_spi, &mut bus, &mut ADDRESS_BUFFER)
+macro_rules! spi_bus_component_static {
+    ($S:ty $(,)?) => {{
+        let spi = kernel::static_buf!(
+            capsules_core::virtualizers::virtual_spi::VirtualSpiMasterDevice<'static, $S>
+        );
+        let address_buffer = kernel::static_buf!([u8; core::mem::size_of::<usize>()]);
+        let bus = kernel::static_buf!(
+            capsules_extra::bus::SpiMasterBus<
+                'static,
+                capsules_core::virtualizers::virtual_spi::VirtualSpiMasterDevice<'static, $S>,
+            >
+        );
+
+        (spi, bus, address_buffer)
     };};
 }
 
 #[macro_export]
-macro_rules! i2c_master_bus_component_helper {
-    () => {{
-        use capsules::bus::I2CMasterBus;
-        use core::mem::{size_of, MaybeUninit};
-        static mut ADDRESS_BUFFER: [u8; 1] = [0; 1];
-        static mut bus: MaybeUninit<I2CMasterBus<'static>> = MaybeUninit::uninit();
-        (&mut bus, &mut ADDRESS_BUFFER)
+macro_rules! i2c_master_bus_component_static {
+    ($D:ty $(,)?) => {{
+        let address_buffer = kernel::static_buf!([u8; 1]);
+        let bus = kernel::static_buf!(capsules_extra::bus::I2CMasterBus<'static, $D>);
+        let i2c_device = kernel::static_buf!(
+            capsules_core::virtualizers::virtual_i2c::I2CDevice<
+                'static,
+                capsules_extra::bus::I2CMasterBus<'static, $D>,
+            >
+        );
+
+        (bus, i2c_device, address_buffer)
     };};
 }
 
 pub struct Bus8080BusComponent<B: 'static + bus8080::Bus8080<'static>> {
-    _bus: PhantomData<B>,
+    bus: &'static B,
 }
 
 impl<B: 'static + bus8080::Bus8080<'static>> Bus8080BusComponent<B> {
-    pub fn new() -> Bus8080BusComponent<B> {
-        Bus8080BusComponent { _bus: PhantomData }
+    pub fn new(bus: &'static B) -> Bus8080BusComponent<B> {
+        Bus8080BusComponent { bus }
     }
 }
 
 impl<B: 'static + bus8080::Bus8080<'static>> Component for Bus8080BusComponent<B> {
-    type StaticInput = (&'static B, &'static mut MaybeUninit<Bus8080Bus<'static, B>>);
+    type StaticInput = &'static mut MaybeUninit<Bus8080Bus<'static, B>>;
     type Output = &'static Bus8080Bus<'static, B>;
 
-    unsafe fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
-        let bus = static_init_half!(
-            static_buffer.1,
-            Bus8080Bus<'static, B>,
-            Bus8080Bus::new(static_buffer.0)
-        );
-        static_buffer.0.set_client(bus);
+    fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
+        let bus = static_buffer.write(Bus8080Bus::new(self.bus));
+        self.bus.set_client(bus);
 
         bus
     }
 }
 
-pub struct SpiMasterBusComponent<S: 'static + spi::SpiMaster> {
-    _select: PhantomData<S>,
+pub struct SpiMasterBusComponent<S: 'static + spi::SpiMaster<'static>> {
+    spi_mux: &'static MuxSpiMaster<'static, S>,
+    chip_select: S::ChipSelect,
     baud_rate: u32,
     clock_phase: ClockPhase,
     clock_polarity: ClockPolarity,
 }
 
-impl<S: 'static + spi::SpiMaster> SpiMasterBusComponent<S> {
+impl<S: 'static + spi::SpiMaster<'static>> SpiMasterBusComponent<S> {
     pub fn new(
+        spi_mux: &'static MuxSpiMaster<'static, S>,
+        chip_select: S::ChipSelect,
         baud_rate: u32,
         clock_phase: ClockPhase,
         clock_polarity: ClockPolarity,
     ) -> SpiMasterBusComponent<S> {
         SpiMasterBusComponent {
-            _select: PhantomData,
+            spi_mux,
+            chip_select,
             baud_rate,
             clock_phase,
             clock_polarity,
@@ -123,65 +124,62 @@ impl<S: 'static + spi::SpiMaster> SpiMasterBusComponent<S> {
     }
 }
 
-impl<S: 'static + spi::SpiMaster> Component for SpiMasterBusComponent<S> {
+impl<S: 'static + spi::SpiMaster<'static>> Component for SpiMasterBusComponent<S> {
     type StaticInput = (
-        &'static VirtualSpiMasterDevice<'static, S>,
+        &'static mut MaybeUninit<VirtualSpiMasterDevice<'static, S>>,
         &'static mut MaybeUninit<SpiMasterBus<'static, VirtualSpiMasterDevice<'static, S>>>,
-        &'static mut [u8],
+        &'static mut MaybeUninit<[u8; core::mem::size_of::<usize>()]>,
     );
     type Output = &'static SpiMasterBus<'static, VirtualSpiMasterDevice<'static, S>>;
 
-    unsafe fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
+    fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
+        let spi_device = static_buffer
+            .0
+            .write(VirtualSpiMasterDevice::new(self.spi_mux, self.chip_select));
+        spi_device.setup();
+
         if let Err(error) =
-            static_buffer
-                .0
-                .configure(self.clock_polarity, self.clock_phase, self.baud_rate)
+            spi_device.configure(self.clock_polarity, self.clock_phase, self.baud_rate)
         {
             panic!("Failed to setup SPI Bus ({:?})", error);
         }
-        let bus = static_init_half!(
-            static_buffer.1,
-            SpiMasterBus<'static, VirtualSpiMasterDevice<'static, S>>,
-            SpiMasterBus::new(static_buffer.0, static_buffer.2)
-        );
-        static_buffer.0.set_client(bus);
+
+        let buffer = static_buffer.2.write([0; core::mem::size_of::<usize>()]);
+
+        let bus = static_buffer.1.write(SpiMasterBus::new(spi_device, buffer));
+        spi_device.set_client(bus);
 
         bus
     }
 }
 
-pub struct I2CMasterBusComponent {
-    i2c_mux: &'static MuxI2C<'static>,
+pub struct I2CMasterBusComponent<I: 'static + i2c::I2CMaster<'static>> {
+    i2c_mux: &'static MuxI2C<'static, I>,
     address: u8,
 }
 
-impl I2CMasterBusComponent {
-    pub fn new(i2c_mux: &'static MuxI2C<'static>, address: u8) -> I2CMasterBusComponent {
-        I2CMasterBusComponent {
-            i2c_mux: i2c_mux,
-            address: address,
-        }
+impl<I: 'static + i2c::I2CMaster<'static>> I2CMasterBusComponent<I> {
+    pub fn new(i2c_mux: &'static MuxI2C<'static, I>, address: u8) -> I2CMasterBusComponent<I> {
+        I2CMasterBusComponent { i2c_mux, address }
     }
 }
 
-impl Component for I2CMasterBusComponent {
+impl<I: 'static + i2c::I2CMaster<'static>> Component for I2CMasterBusComponent<I> {
     type StaticInput = (
-        &'static mut MaybeUninit<I2CMasterBus<'static, I2CDevice<'static>>>,
-        &'static mut [u8],
+        &'static mut MaybeUninit<I2CMasterBus<'static, I2CDevice<'static, I>>>,
+        &'static mut MaybeUninit<I2CDevice<'static, I>>,
+        &'static mut MaybeUninit<[u8; 1]>,
     );
-    type Output = &'static I2CMasterBus<'static, I2CDevice<'static>>;
+    type Output = &'static I2CMasterBus<'static, I2CDevice<'static, I>>;
 
-    unsafe fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
-        let bus_i2c: &'static I2CDevice<'static> =
-            crate::i2c::I2CComponent::new(self.i2c_mux, self.address)
-                .finalize(crate::i2c_component_helper!());
+    fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
+        let i2c_device = static_buffer
+            .1
+            .write(I2CDevice::new(self.i2c_mux, self.address));
+        let buffer = static_buffer.2.write([0; 1]);
 
-        let bus = static_init_half!(
-            static_buffer.0,
-            I2CMasterBus<'static, I2CDevice<'static>>,
-            I2CMasterBus::new(bus_i2c, static_buffer.1)
-        );
-        bus_i2c.set_client(bus);
+        let bus = static_buffer.0.write(I2CMasterBus::new(i2c_device, buffer));
+        i2c_device.set_client(bus);
 
         bus
     }

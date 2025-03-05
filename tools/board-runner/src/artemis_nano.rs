@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use rexpect::errors::Error;
 use rexpect::spawn_stream;
 use serialport::prelude::*;
@@ -23,7 +27,7 @@ fn artemis_nano_flash(
     // Flash the app
     let mut build = Command::new("make")
         .arg("-C")
-        .arg("../../boards/redboard_artemis_nano")
+        .arg("../../boards/apollo3/redboard_artemis_nano")
         .arg(format!("APP={}", app_name))
         .arg("flash-app")
         .stdout(Stdio::null())

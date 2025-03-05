@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use crate::clocks;
 use crate::resets;
 use core::cell::Cell;
@@ -237,13 +241,13 @@ enum State {
     WaitingForStop,
 }
 
-pub struct I2c<'a> {
+pub struct I2c<'a, 'c> {
     instance_num: u8,
     registers: StaticRef<I2cRegisters>,
     clocks: OptionalCell<&'a clocks::Clocks>,
     resets: OptionalCell<&'a resets::Resets>,
 
-    client: OptionalCell<&'static dyn hil::i2c::I2CHwMasterClient>,
+    client: OptionalCell<&'c dyn hil::i2c::I2CHwMasterClient>,
     buf: TakeCell<'static, [u8]>,
 
     state: Cell<State>,
@@ -255,8 +259,8 @@ pub struct I2c<'a> {
     abort_reason: OptionalCell<LocalRegisterCopy<u32, IC_TX_ABRT_SOURCE::Register>>,
 }
 
-impl<'a> I2c<'a> {
-    const fn new(instance_num: u8) -> Self {
+impl<'a> I2c<'a, '_> {
+    fn new(instance_num: u8) -> Self {
         Self {
             instance_num,
             registers: INSTANCES[instance_num as usize],
@@ -276,11 +280,11 @@ impl<'a> I2c<'a> {
         }
     }
 
-    pub const fn new_i2c0() -> Self {
+    pub fn new_i2c0() -> Self {
         I2c::new(0)
     }
 
-    pub const fn new_i2c1() -> Self {
+    pub fn new_i2c1() -> Self {
         I2c::new(1)
     }
 
@@ -339,18 +343,17 @@ impl<'a> I2c<'a> {
         // internally provide a hold time of at least 300ns for the SDA signal to
         // bridge the undefined region of the falling edge of SCL. A smaller hold
         // time of 120ns is used for fast mode plus.
-        let sda_tx_hold_count;
-        if baudrate < 1000000 {
+        let sda_tx_hold_count = if baudrate < 1000000 {
             // sda_tx_hold_count = freq_in [cycles/s] * 300ns * (1s / 1e9ns)
             // Reduce 300/1e9 to 3/1e7 to avoid numbers that don't fit in uint.
             // Add 1 to avoid division truncation.
-            sda_tx_hold_count = ((freq_in * 3) / 10000000) + 1;
+            ((freq_in * 3) / 10000000) + 1
         } else {
             // sda_tx_hold_count = freq_in [cycles/s] * 120ns * (1s / 1e9ns)
             // Reduce 120/1e9 to 3/25e6 to avoid numbers that don't fit in uint.
             // Add 1 to avoid division truncation.
-            sda_tx_hold_count = ((freq_in * 3) / 25000000) + 1;
-        }
+            ((freq_in * 3) / 25000000) + 1
+        };
         assert!(sda_tx_hold_count <= lcnt - 2);
 
         self.registers.ic_enable.modify(IC_ENABLE::ENABLE::CLEAR);
@@ -411,8 +414,8 @@ impl<'a> I2c<'a> {
     fn write_then_read(
         &self,
         addr: u8,
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), hil::i2c::Error> {
         let state = self.state.get();
         assert!(state != State::Uninitialized);
@@ -527,7 +530,7 @@ impl<'a> I2c<'a> {
         self.rw_index.set(idx + 1);
     }
 
-    fn read(&self, addr: u8, len: u8) -> Result<(), hil::i2c::Error> {
+    fn read(&self, addr: u8, len: usize) -> Result<(), hil::i2c::Error> {
         let state = self.state.get();
         assert!(state != State::Uninitialized);
         if state != State::Idle {
@@ -685,8 +688,8 @@ impl<'a> I2c<'a> {
     }
 }
 
-impl<'a> hil::i2c::I2CMaster for I2c<'a> {
-    fn set_master_client(&self, client: &'static dyn hil::i2c::I2CHwMasterClient) {
+impl<'c> hil::i2c::I2CMaster<'c> for I2c<'_, 'c> {
+    fn set_master_client(&self, client: &'c dyn hil::i2c::I2CHwMasterClient) {
         self.client.set(client);
     }
 
@@ -703,8 +706,8 @@ impl<'a> hil::i2c::I2CMaster for I2c<'a> {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.buf.put(Some(data));
 
@@ -720,7 +723,7 @@ impl<'a> hil::i2c::I2CMaster for I2c<'a> {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         // Setting read_len to 0 will result in having just a write
         self.write_read(addr, data, len, 0)
@@ -730,7 +733,7 @@ impl<'a> hil::i2c::I2CMaster for I2c<'a> {
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.buf.put(Some(buffer));
 

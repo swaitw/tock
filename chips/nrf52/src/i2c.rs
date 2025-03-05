@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Implementation of I2C for nRF52 using EasyDMA.
 //!
 //! This module supports nRF52's two I2C master (`TWI`) peripherals,
@@ -24,10 +28,10 @@ const INSTANCES: [StaticRef<TwiRegisters>; 2] = unsafe {
 ///
 /// A `TWI` instance wraps a `registers::TWI` together with
 /// additional data necessary to implement an asynchronous interface.
-pub struct TWI {
+pub struct TWI<'a> {
     registers: StaticRef<TwiRegisters>,
-    client: OptionalCell<&'static dyn hil::i2c::I2CHwMasterClient>,
-    slave_client: OptionalCell<&'static dyn hil::i2c::I2CHwSlaveClient>,
+    client: OptionalCell<&'a dyn hil::i2c::I2CHwMasterClient>,
+    slave_client: OptionalCell<&'a dyn hil::i2c::I2CHwSlaveClient>,
     buf: TakeCell<'static, [u8]>,
     slave_read_buf: TakeCell<'static, [u8]>,
 }
@@ -40,7 +44,7 @@ pub enum Speed {
     K400 = 0x06400000,
 }
 
-impl TWI {
+impl TWI<'_> {
     const fn new(registers: StaticRef<TwiRegisters>) -> Self {
         Self {
             registers,
@@ -71,18 +75,43 @@ impl TWI {
         self.registers.frequency.set(speed as u32);
     }
 
+    /// Clear all pending events
+    /// This is useful when switching between a master and slave mode to ensure
+    /// we start from a clean state.
+    pub fn clear_events(&self) {
+        self.registers.events_stopped.write(EVENT::EVENT::CLEAR);
+        self.registers.events_error.write(EVENT::EVENT::CLEAR);
+        self.registers.events_rxstarted.write(EVENT::EVENT::CLEAR);
+        self.registers.events_txstarted.write(EVENT::EVENT::CLEAR);
+        self.registers.events_write.write(EVENT::EVENT::CLEAR);
+        self.registers.events_read.write(EVENT::EVENT::CLEAR);
+        self.registers.events_suspended.write(EVENT::EVENT::CLEAR);
+        self.registers.events_lastrx.write(EVENT::EVENT::CLEAR);
+        self.registers.events_lasttx.write(EVENT::EVENT::CLEAR);
+    }
+
+    pub fn disable_interrupts(&self) {
+        // Disable all interrupts
+        self.registers.inten.set(0x00);
+        self.registers.intenclr.set(0xFFFF_FFFF);
+    }
+
     /// Enables hardware TWIM peripheral.
     fn enable_master(&self) {
+        self.clear_events();
         self.registers.enable.write(ENABLE::ENABLE::EnableMaster);
     }
 
     /// Enables hardware TWIS peripheral.
     fn enable_slave(&self) {
+        self.clear_events();
         self.registers.enable.write(ENABLE::ENABLE::EnableSlave);
     }
 
     /// Disables hardware TWIM/TWIS peripheral.
     fn disable(&self) {
+        self.clear_events();
+        self.disable_interrupts();
         self.registers.enable.write(ENABLE::ENABLE::Disable);
     }
 
@@ -94,6 +123,7 @@ impl TWI {
                 self.client.map(|client| match self.buf.take() {
                     None => (),
                     Some(buf) => {
+                        self.clear_events();
                         client.command_complete(buf, Ok(()));
                     }
                 });
@@ -115,6 +145,7 @@ impl TWI {
                         } else {
                             Ok(())
                         };
+                        self.clear_events();
                         client.command_complete(buf, status);
                     }
                 });
@@ -122,25 +153,36 @@ impl TWI {
         } else {
             self.registers.events_stopped.write(EVENT::EVENT::CLEAR);
 
-            // If RX started and we don't have a buffer then report
-            // read_expected()
+            // If RX started (master started write) and we don't have a buffer then report
+            // write_expected()
             if self.registers.events_rxstarted.is_set(EVENT::EVENT) {
                 self.registers.events_rxstarted.write(EVENT::EVENT::CLEAR);
-                self.slave_client
-                    .map(|client| match self.slave_read_buf.take() {
-                        None => {
-                            client.read_expected();
-                        }
-                        Some(_buf) => {}
-                    });
+                self.slave_client.map(|client| {
+                    if self.buf.is_none() {
+                        client.write_expected();
+                    }
+                });
             }
 
+            // If TX started (master started read) and we don't have a buffer then report
+            // read_expected()
+            if self.registers.events_txstarted.is_set(EVENT::EVENT) {
+                self.registers.events_txstarted.write(EVENT::EVENT::CLEAR);
+                self.slave_client.map(|client| {
+                    if self.slave_read_buf.is_none() {
+                        client.read_expected();
+                    }
+                });
+            }
+
+            // Write command received
             if self.registers.events_write.is_set(EVENT::EVENT) {
                 self.registers.events_write.write(EVENT::EVENT::CLEAR);
-                let length = self.registers.rxd_amount.read(AMOUNT::AMOUNT) as u8;
+                let length = self.registers.rxd_amount.read(AMOUNT::AMOUNT) as usize;
                 self.slave_client.map(|client| match self.buf.take() {
                     None => (),
                     Some(buf) => {
+                        self.clear_events();
                         client.command_complete(
                             buf,
                             length,
@@ -152,11 +194,12 @@ impl TWI {
 
             if self.registers.events_read.is_set(EVENT::EVENT) {
                 self.registers.events_read.write(EVENT::EVENT::CLEAR);
-                let length = self.registers.txd_amount.read(AMOUNT::AMOUNT) as u8;
+                let length = self.registers.txd_amount.read(AMOUNT::AMOUNT) as usize;
                 self.slave_client
                     .map(|client| match self.slave_read_buf.take() {
                         None => (),
                         Some(buf) => {
+                            self.clear_events();
                             client.command_complete(
                                 buf,
                                 length,
@@ -169,7 +212,6 @@ impl TWI {
 
         // We can blindly clear the following events since we're not using them.
         self.registers.events_suspended.write(EVENT::EVENT::CLEAR);
-        self.registers.events_rxstarted.write(EVENT::EVENT::CLEAR);
         self.registers.events_lastrx.write(EVENT::EVENT::CLEAR);
         self.registers.events_lasttx.write(EVENT::EVENT::CLEAR);
     }
@@ -191,8 +233,8 @@ impl TWI {
     }
 }
 
-impl hil::i2c::I2CMaster for TWI {
-    fn set_master_client(&self, client: &'static dyn hil::i2c::I2CHwMasterClient) {
+impl<'a> hil::i2c::I2CMaster<'a> for TWI<'a> {
+    fn set_master_client(&self, client: &'a dyn hil::i2c::I2CHwMasterClient) {
         self.client.set(client);
     }
 
@@ -208,8 +250,8 @@ impl hil::i2c::I2CMaster for TWI {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.registers
             .address_0
@@ -242,7 +284,7 @@ impl hil::i2c::I2CMaster for TWI {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.registers
             .address_0
@@ -269,7 +311,7 @@ impl hil::i2c::I2CMaster for TWI {
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.registers
             .address_0
@@ -293,8 +335,8 @@ impl hil::i2c::I2CMaster for TWI {
     }
 }
 
-impl hil::i2c::I2CSlave for TWI {
-    fn set_slave_client(&self, client: &'static dyn hil::i2c::I2CHwSlaveClient) {
+impl<'a> hil::i2c::I2CSlave<'a> for TWI<'a> {
+    fn set_slave_client(&self, client: &'a dyn hil::i2c::I2CHwSlaveClient) {
         self.slave_client.set(client);
     }
 
@@ -317,7 +359,7 @@ impl hil::i2c::I2CSlave for TWI {
     fn write_receive(
         &self,
         data: &'static mut [u8],
-        max_len: u8,
+        max_len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.registers.rxd_ptr.set(data.as_mut_ptr() as u32);
         self.registers
@@ -338,7 +380,7 @@ impl hil::i2c::I2CSlave for TWI {
     fn read_send(
         &self,
         data: &'static mut [u8],
-        max_len: u8,
+        max_len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         self.registers.txd_ptr.set(data.as_mut_ptr() as u32);
         self.registers
@@ -360,6 +402,8 @@ impl hil::i2c::I2CSlave for TWI {
         self.registers.tasks_preparerx.write(TASK::TASK::SET);
     }
 }
+
+impl<'a> hil::i2c::I2CMasterSlave<'a> for TWI<'a> {}
 
 // The SPI0_TWI0 and SPI1_TWI1 interrupts are dispatched to the
 // correct handler by the service_pending_interrupts() routine in
@@ -585,7 +629,7 @@ register_bitfields![u32,
         MAXCNT OFFSET(0) NUMBITS(16)
     ],
     AMOUNT [
-        AMOUNT OFFSET(0) NUMBITS(7),
+        AMOUNT OFFSET(0) NUMBITS(16),
     ],
     ADDRESS [
         /// Address used in the TWI transfer

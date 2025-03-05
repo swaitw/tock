@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Cooperative Scheduler for Tock
 //!
 //! This scheduler runs all processes in a round-robin fashion, but does not use
@@ -12,9 +16,9 @@
 //! that was executing.
 
 use crate::collections::list::{List, ListLink, ListNode};
-use crate::kernel::{Kernel, StoppedExecutingReason};
 use crate::platform::chip::Chip;
 use crate::process::Process;
+use crate::process::StoppedExecutingReason;
 use crate::scheduler::{Scheduler, SchedulingDecision};
 
 /// A node in the linked list the scheduler uses to track processes
@@ -33,7 +37,7 @@ impl<'a> CoopProcessNode<'a> {
 }
 
 impl<'a> ListNode<'a, CoopProcessNode<'a>> for CoopProcessNode<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, CoopProcessNode> {
+    fn next(&'a self) -> &'a ListLink<'a, CoopProcessNode<'a>> {
         &self.next
     }
 }
@@ -51,34 +55,40 @@ impl<'a> CooperativeSched<'a> {
     }
 }
 
-impl<'a, C: Chip> Scheduler<C> for CooperativeSched<'a> {
-    fn next(&self, kernel: &Kernel) -> SchedulingDecision {
-        if kernel.processes_blocked() {
-            // No processes ready
-            SchedulingDecision::TrySleep
-        } else {
-            let mut next = None; // This will be replaced, bc a process is guaranteed
-                                 // to be ready if processes_blocked() is false
+impl<C: Chip> Scheduler<C> for CooperativeSched<'_> {
+    fn next(&self) -> SchedulingDecision {
+        let mut first_head = None;
 
-            // Find next ready process. Place any *empty* process slots, or not-ready
-            // processes, at the back of the queue.
-            for node in self.processes.iter() {
-                match node.proc {
-                    Some(proc) => {
-                        if proc.ready() {
-                            next = Some(proc.processid());
-                            break;
-                        }
-                        self.processes.push_tail(self.processes.pop_head().unwrap());
-                    }
-                    None => {
-                        self.processes.push_tail(self.processes.pop_head().unwrap());
+        // Find the first ready process in the queue. Place any *empty* process slots,
+        // or not-ready processes, at the back of the queue.
+        while let Some(node) = self.processes.head() {
+            // Ensure we do not loop forever if all processes are not not ready
+            match first_head {
+                None => first_head = Some(node),
+                Some(first_head) => {
+                    // We make a full iteration and nothing was ready. Try to sleep instead
+                    if core::ptr::eq(first_head, node) {
+                        return SchedulingDecision::TrySleep;
                     }
                 }
             }
-
-            SchedulingDecision::RunProcess((next.unwrap(), None))
+            match node.proc {
+                Some(proc) => {
+                    if proc.ready() {
+                        let next = proc.processid();
+                        return SchedulingDecision::RunProcess((next, None));
+                    }
+                    self.processes.push_tail(self.processes.pop_head().unwrap());
+                }
+                None => {
+                    self.processes.push_tail(self.processes.pop_head().unwrap());
+                }
+            }
         }
+
+        // If the length of `self.processes` is 0, the while loop never executes. In this case,
+        // return `SchedulingDecision::TrySleep` as there is no process that can be scheduled.
+        SchedulingDecision::TrySleep
     }
 
     fn result(&self, result: StoppedExecutingReason, _: Option<u32>) {

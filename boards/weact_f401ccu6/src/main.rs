@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Board file for WeAct STM32F401CCU6 Core Board
 //!
 //! - <https://github.com/WeActTC/MiniF4-STM32F4x1>
@@ -8,16 +12,19 @@
 #![cfg_attr(not(doc), no_main)]
 #![deny(missing_docs)]
 
-use capsules::virtual_alarm::VirtualMuxAlarm;
+use core::ptr::{addr_of, addr_of_mut};
+
+use capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm;
 use components::gpio::GpioComponent;
 use kernel::capabilities;
 use kernel::component::Component;
-use kernel::dynamic_deferred_call::{DynamicDeferredCall, DynamicDeferredCallClientState};
 use kernel::hil::led::LedLow;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
 use kernel::scheduler::round_robin::RoundRobinSched;
 use kernel::{create_capability, debug, static_init};
 
+use stm32f401cc::chip_specs::Stm32f401Specs;
+use stm32f401cc::clocks::hsi::HSI_FREQUENCY_MHZ;
 use stm32f401cc::interrupt_service::Stm32f401ccDefaultPeripherals;
 
 /// Support routines for debugging I/O.
@@ -25,7 +32,6 @@ pub mod io;
 
 // Number of concurrent processes this platform supports.
 const NUM_PROCS: usize = 4;
-const NUM_UPCALLS_IPC: usize = NUM_PROCS + 1;
 
 // Actual memory for holding the active process structures.
 static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
@@ -33,9 +39,12 @@ static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS]
 
 static mut CHIP: Option<&'static stm32f401cc::chip::Stm32f4xx<Stm32f401ccDefaultPeripherals>> =
     None;
+static mut PROCESS_PRINTER: Option<&'static capsules_system::process_printer::ProcessPrinterText> =
+    None;
 
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 /// Dummy buffer that causes the linker to reserve enough space for the stack.
 #[no_mangle]
@@ -45,20 +54,20 @@ pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
 /// A structure representing this platform that holds references to all
 /// capsules for this platform.
 struct WeactF401CC {
-    console: &'static capsules::console::Console<'static>,
-    ipc: kernel::ipc::IPC<NUM_PROCS, NUM_UPCALLS_IPC>,
-    led: &'static capsules::led::LedDriver<
+    console: &'static capsules_core::console::Console<'static>,
+    ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
+    led: &'static capsules_core::led::LedDriver<
         'static,
         LedLow<'static, stm32f401cc::gpio::Pin<'static>>,
         1,
     >,
-    button: &'static capsules::button::Button<'static, stm32f401cc::gpio::Pin<'static>>,
-    adc: &'static capsules::adc::AdcVirtualized<'static>,
-    alarm: &'static capsules::alarm::AlarmDriver<
+    button: &'static capsules_core::button::Button<'static, stm32f401cc::gpio::Pin<'static>>,
+    adc: &'static capsules_core::adc::AdcVirtualized<'static>,
+    alarm: &'static capsules_core::alarm::AlarmDriver<
         'static,
         VirtualMuxAlarm<'static, stm32f401cc::tim2::Tim2<'static>>,
     >,
-    gpio: &'static capsules::gpio::GPIO<'static, stm32f401cc::gpio::Pin<'static>>,
+    gpio: &'static capsules_core::gpio::GPIO<'static, stm32f401cc::gpio::Pin<'static>>,
     scheduler: &'static RoundRobinSched<'static>,
     systick: cortexm4::systick::SysTick,
 }
@@ -70,13 +79,13 @@ impl SyscallDriverLookup for WeactF401CC {
         F: FnOnce(Option<&dyn kernel::syscall::SyscallDriver>) -> R,
     {
         match driver_num {
-            capsules::console::DRIVER_NUM => f(Some(self.console)),
-            capsules::led::DRIVER_NUM => f(Some(self.led)),
-            capsules::button::DRIVER_NUM => f(Some(self.button)),
-            capsules::adc::DRIVER_NUM => f(Some(self.adc)),
-            capsules::alarm::DRIVER_NUM => f(Some(self.alarm)),
+            capsules_core::console::DRIVER_NUM => f(Some(self.console)),
+            capsules_core::led::DRIVER_NUM => f(Some(self.led)),
+            capsules_core::button::DRIVER_NUM => f(Some(self.button)),
+            capsules_core::adc::DRIVER_NUM => f(Some(self.adc)),
+            capsules_core::alarm::DRIVER_NUM => f(Some(self.alarm)),
             kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
-            capsules::gpio::DRIVER_NUM => f(Some(self.gpio)),
+            capsules_core::gpio::DRIVER_NUM => f(Some(self.gpio)),
             _ => f(None),
         }
     }
@@ -94,7 +103,7 @@ impl KernelResources<stm32f401cc::chip::Stm32f4xx<'static, Stm32f401ccDefaultPer
     type ContextSwitchCallback = ();
 
     fn syscall_driver_lookup(&self) -> &Self::SyscallDriverLookup {
-        &self
+        self
     }
     fn syscall_filter(&self) -> &Self::SyscallFilter {
         &()
@@ -118,11 +127,11 @@ impl KernelResources<stm32f401cc::chip::Stm32f4xx<'static, Stm32f401ccDefaultPer
 
 /// Helper function called during bring-up that configures DMA.
 unsafe fn setup_dma(
-    dma: &stm32f401cc::dma1::Dma1,
-    dma_streams: &'static [stm32f401cc::dma1::Stream; 8],
-    usart2: &'static stm32f401cc::usart::Usart,
+    dma: &stm32f401cc::dma::Dma1,
+    dma_streams: &'static [stm32f401cc::dma::Stream<stm32f401cc::dma::Dma1>; 8],
+    usart2: &'static stm32f401cc::usart::Usart<stm32f401cc::dma::Dma1>,
 ) {
-    use stm32f401cc::dma1::Dma1Peripheral;
+    use stm32f401cc::dma::Dma1Peripheral;
     use stm32f401cc::usart;
 
     dma.enable_clock();
@@ -204,43 +213,41 @@ unsafe fn setup_peripherals(tim2: &stm32f401cc::tim2::Tim2) {
     cortexm4::nvic::Nvic::new(stm32f401cc::nvic::TIM2).enable();
 }
 
-/// Statically initialize the core peripherals for the chip.
+/// Main function
 ///
 /// This is in a separate, inline(never) function so that its stack frame is
 /// removed when this function returns. Otherwise, the stack space used for
 /// these static_inits is wasted.
 #[inline(never)]
-unsafe fn get_peripherals() -> (
-    &'static mut Stm32f401ccDefaultPeripherals<'static>,
-    &'static stm32f401cc::syscfg::Syscfg<'static>,
-    &'static stm32f401cc::dma1::Dma1<'static>,
+unsafe fn start() -> (
+    &'static kernel::Kernel,
+    WeactF401CC,
+    &'static stm32f401cc::chip::Stm32f4xx<'static, Stm32f401ccDefaultPeripherals<'static>>,
 ) {
+    stm32f401cc::init();
+
     // We use the default HSI 16Mhz clock
     let rcc = static_init!(stm32f401cc::rcc::Rcc, stm32f401cc::rcc::Rcc::new());
+    let clocks = static_init!(
+        stm32f401cc::clocks::Clocks<Stm32f401Specs>,
+        stm32f401cc::clocks::Clocks::new(rcc)
+    );
     let syscfg = static_init!(
         stm32f401cc::syscfg::Syscfg,
-        stm32f401cc::syscfg::Syscfg::new(rcc)
+        stm32f401cc::syscfg::Syscfg::new(clocks)
     );
     let exti = static_init!(
         stm32f401cc::exti::Exti,
         stm32f401cc::exti::Exti::new(syscfg)
     );
-    let dma1 = static_init!(stm32f401cc::dma1::Dma1, stm32f401cc::dma1::Dma1::new(rcc));
+    let dma1 = static_init!(stm32f401cc::dma::Dma1, stm32f401cc::dma::Dma1::new(clocks));
+    let dma2 = static_init!(stm32f401cc::dma::Dma2, stm32f401cc::dma::Dma2::new(clocks));
+
     let peripherals = static_init!(
         Stm32f401ccDefaultPeripherals,
-        Stm32f401ccDefaultPeripherals::new(rcc, exti, dma1)
+        Stm32f401ccDefaultPeripherals::new(clocks, exti, dma1, dma2)
     );
-    (peripherals, syscfg, dma1)
-}
 
-/// Main function.
-///
-/// This is called after RAM initialization is complete.
-#[no_mangle]
-pub unsafe fn main() {
-    stm32f401cc::init();
-
-    let (peripherals, syscfg, dma1) = get_peripherals();
     peripherals.init();
     let base_peripherals = &peripherals.stm32f4;
 
@@ -250,19 +257,11 @@ pub unsafe fn main() {
 
     setup_dma(
         dma1,
-        &base_peripherals.dma_streams,
+        &base_peripherals.dma1_streams,
         &base_peripherals.usart2,
     );
 
-    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&PROCESSES));
-
-    let dynamic_deferred_call_clients =
-        static_init!([DynamicDeferredCallClientState; 2], Default::default());
-    let dynamic_deferred_caller = static_init!(
-        DynamicDeferredCall,
-        DynamicDeferredCall::new(dynamic_deferred_call_clients)
-    );
-    DynamicDeferredCall::set_global_instance(dynamic_deferred_caller);
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&*addr_of!(PROCESSES)));
 
     let chip = static_init!(
         stm32f401cc::chip::Stm32f4xx<Stm32f401ccDefaultPeripherals>,
@@ -274,37 +273,33 @@ pub unsafe fn main() {
 
     // Create a shared UART channel for kernel debug.
     base_peripherals.usart2.enable_clock();
-    let uart_mux = components::console::UartMuxComponent::new(
-        &base_peripherals.usart2,
-        115200,
-        dynamic_deferred_caller,
-    )
-    .finalize(());
+    let uart_mux = components::console::UartMuxComponent::new(&base_peripherals.usart2, 115200)
+        .finalize(components::uart_mux_component_static!());
 
-    io::WRITER.set_initialized();
+    (*addr_of_mut!(io::WRITER)).set_initialized();
 
     // Create capabilities that the board needs to call certain protected kernel
     // functions.
     let memory_allocation_capability = create_capability!(capabilities::MemoryAllocationCapability);
-    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
     let process_management_capability =
         create_capability!(capabilities::ProcessManagementCapability);
 
     // Setup the console.
     let console = components::console::ConsoleComponent::new(
         board_kernel,
-        capsules::console::DRIVER_NUM,
+        capsules_core::console::DRIVER_NUM,
         uart_mux,
     )
-    .finalize(());
+    .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(uart_mux).finalize(());
+    components::debug_writer::DebugWriterComponent::new(uart_mux)
+        .finalize(components::debug_writer_component_static!());
 
     // LEDs
     // Clock to Port A, B, C are enabled in `set_pin_primary_functions()`
     let gpio_ports = &base_peripherals.gpio_ports;
 
-    let led = components::led::LedsComponent::new().finalize(components::led_component_helper!(
+    let led = components::led::LedsComponent::new().finalize(components::led_component_static!(
         LedLow<'static, stm32f401cc::gpio::Pin>,
         LedLow::new(gpio_ports.get_pin(stm32f401cc::gpio::PinId::PC13).unwrap()),
     ));
@@ -312,7 +307,7 @@ pub unsafe fn main() {
     // BUTTONs
     let button = components::button::ButtonComponent::new(
         board_kernel,
-        capsules::button::DRIVER_NUM,
+        capsules_core::button::DRIVER_NUM,
         components::button_component_helper!(
             stm32f401cc::gpio::Pin,
             (
@@ -322,26 +317,26 @@ pub unsafe fn main() {
             )
         ),
     )
-    .finalize(components::button_component_buf!(stm32f401cc::gpio::Pin));
+    .finalize(components::button_component_static!(stm32f401cc::gpio::Pin));
 
     // ALARM
 
     let tim2 = &base_peripherals.tim2;
     let mux_alarm = components::alarm::AlarmMuxComponent::new(tim2).finalize(
-        components::alarm_mux_component_helper!(stm32f401cc::tim2::Tim2),
+        components::alarm_mux_component_static!(stm32f401cc::tim2::Tim2),
     );
 
     let alarm = components::alarm::AlarmDriverComponent::new(
         board_kernel,
-        capsules::alarm::DRIVER_NUM,
+        capsules_core::alarm::DRIVER_NUM,
         mux_alarm,
     )
-    .finalize(components::alarm_component_helper!(stm32f401cc::tim2::Tim2));
+    .finalize(components::alarm_component_static!(stm32f401cc::tim2::Tim2));
 
     // GPIO
     let gpio = GpioComponent::new(
         board_kernel,
-        capsules::gpio::DRIVER_NUM,
+        capsules_core::gpio::DRIVER_NUM,
         components::gpio_component_helper!(
             stm32f401cc::gpio::Pin,
             // 2 => gpio_ports.pins[2][13].as_ref().unwrap(), // C13 (reserved for led)
@@ -380,38 +375,38 @@ pub unsafe fn main() {
             46 => gpio_ports.pins[1][9].as_ref().unwrap(), // B9
         ),
     )
-    .finalize(components::gpio_component_buf!(stm32f401cc::gpio::Pin));
+    .finalize(components::gpio_component_static!(stm32f401cc::gpio::Pin));
 
     // ADC
     let adc_mux = components::adc::AdcMuxComponent::new(&base_peripherals.adc1)
-        .finalize(components::adc_mux_component_helper!(stm32f401cc::adc::Adc));
+        .finalize(components::adc_mux_component_static!(stm32f401cc::adc::Adc));
 
     let adc_channel_0 =
-        components::adc::AdcComponent::new(&adc_mux, stm32f401cc::adc::Channel::Channel3)
-            .finalize(components::adc_component_helper!(stm32f401cc::adc::Adc));
+        components::adc::AdcComponent::new(adc_mux, stm32f401cc::adc::Channel::Channel3)
+            .finalize(components::adc_component_static!(stm32f401cc::adc::Adc));
 
     let adc_channel_1 =
-        components::adc::AdcComponent::new(&adc_mux, stm32f401cc::adc::Channel::Channel10)
-            .finalize(components::adc_component_helper!(stm32f401cc::adc::Adc));
+        components::adc::AdcComponent::new(adc_mux, stm32f401cc::adc::Channel::Channel10)
+            .finalize(components::adc_component_static!(stm32f401cc::adc::Adc));
 
     let adc_channel_2 =
-        components::adc::AdcComponent::new(&adc_mux, stm32f401cc::adc::Channel::Channel13)
-            .finalize(components::adc_component_helper!(stm32f401cc::adc::Adc));
+        components::adc::AdcComponent::new(adc_mux, stm32f401cc::adc::Channel::Channel13)
+            .finalize(components::adc_component_static!(stm32f401cc::adc::Adc));
 
     let adc_channel_3 =
-        components::adc::AdcComponent::new(&adc_mux, stm32f401cc::adc::Channel::Channel9)
-            .finalize(components::adc_component_helper!(stm32f401cc::adc::Adc));
+        components::adc::AdcComponent::new(adc_mux, stm32f401cc::adc::Channel::Channel9)
+            .finalize(components::adc_component_static!(stm32f401cc::adc::Adc));
 
     let adc_channel_4 =
-        components::adc::AdcComponent::new(&adc_mux, stm32f401cc::adc::Channel::Channel15)
-            .finalize(components::adc_component_helper!(stm32f401cc::adc::Adc));
+        components::adc::AdcComponent::new(adc_mux, stm32f401cc::adc::Channel::Channel15)
+            .finalize(components::adc_component_static!(stm32f401cc::adc::Adc));
 
     let adc_channel_5 =
-        components::adc::AdcComponent::new(&adc_mux, stm32f401cc::adc::Channel::Channel8)
-            .finalize(components::adc_component_helper!(stm32f401cc::adc::Adc));
+        components::adc::AdcComponent::new(adc_mux, stm32f401cc::adc::Channel::Channel8)
+            .finalize(components::adc_component_static!(stm32f401cc::adc::Adc));
 
     let adc_syscall =
-        components::adc::AdcVirtualComponent::new(board_kernel, capsules::adc::DRIVER_NUM)
+        components::adc::AdcVirtualComponent::new(board_kernel, capsules_core::adc::DRIVER_NUM)
             .finalize(components::adc_syscall_component_helper!(
                 adc_channel_0,
                 adc_channel_1,
@@ -421,39 +416,47 @@ pub unsafe fn main() {
                 adc_channel_5
             ));
 
+    let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
+        .finalize(components::process_printer_text_component_static!());
+    PROCESS_PRINTER = Some(process_printer);
+
     // PROCESS CONSOLE
     let process_console = components::process_console::ProcessConsoleComponent::new(
         board_kernel,
         uart_mux,
         mux_alarm,
+        process_printer,
+        Some(cortexm4::support::reset),
     )
-    .finalize(components::process_console_component_helper!(
+    .finalize(components::process_console_component_static!(
         stm32f401cc::tim2::Tim2
     ));
     let _ = process_console.start();
 
-    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&PROCESSES)
-        .finalize(components::rr_component_helper!(NUM_PROCS));
+    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&*addr_of!(PROCESSES))
+        .finalize(components::round_robin_component_static!(NUM_PROCS));
 
     let weact_f401cc = WeactF401CC {
-        console: console,
+        console,
         ipc: kernel::ipc::IPC::new(
             board_kernel,
             kernel::ipc::DRIVER_NUM,
             &memory_allocation_capability,
         ),
         adc: adc_syscall,
-        led: led,
-        button: button,
-        alarm: alarm,
-        gpio: gpio,
+        led,
+        button,
+        alarm,
+        gpio,
         scheduler,
-        systick: cortexm4::systick::SysTick::new(),
+        systick: cortexm4::systick::SysTick::new_with_calibration(
+            (HSI_FREQUENCY_MHZ * 1_000_000) as u32,
+        ),
     };
 
     debug!("Initialization complete. Entering main loop");
 
-    /// These symbols are defined in the linker script.
+    // These symbols are defined in the linker script.
     extern "C" {
         /// Beginning of the ROM region containing app images.
         static _sapps: u8;
@@ -469,14 +472,14 @@ pub unsafe fn main() {
         board_kernel,
         chip,
         core::slice::from_raw_parts(
-            &_sapps as *const u8,
-            &_eapps as *const u8 as usize - &_sapps as *const u8 as usize,
+            core::ptr::addr_of!(_sapps),
+            core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
         ),
         core::slice::from_raw_parts_mut(
-            &mut _sappmem as *mut u8,
-            &_eappmem as *const u8 as usize - &_sappmem as *const u8 as usize,
+            core::ptr::addr_of_mut!(_sappmem),
+            core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
         ),
-        &mut PROCESSES,
+        &mut *addr_of_mut!(PROCESSES),
         &FAULT_RESPONSE,
         &process_management_capability,
     )
@@ -490,10 +493,14 @@ pub unsafe fn main() {
     .finalize(components::multi_alarm_test_component_buf!(stm32f401cc::tim2::Tim2))
     .run();*/
 
-    board_kernel.kernel_loop(
-        &weact_f401cc,
-        chip,
-        Some(&weact_f401cc.ipc),
-        &main_loop_capability,
-    );
+    (board_kernel, weact_f401cc, chip)
+}
+
+/// Main function called after RAM initialized.
+#[no_mangle]
+pub unsafe fn main() {
+    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
+
+    let (board_kernel, platform, chip) = start();
+    board_kernel.kernel_loop(&platform, chip, Some(&platform.ipc), &main_loop_capability);
 }

@@ -1,11 +1,11 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! OTBN Control
 
 use core::cell::Cell;
-use kernel::dynamic_deferred_call::{
-    DeferredCallHandle, DynamicDeferredCall, DynamicDeferredCallClient,
-};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::utilities::leasable_buffer::LeasableBuffer;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
     register_bitfields, register_structs, ReadOnly, ReadWrite, WriteOnly,
@@ -15,16 +15,6 @@ use kernel::ErrorCode;
 
 /// Implement this trait and use `set_client()` in order to receive callbacks.
 pub trait Client<'a> {
-    /// This callback is called when the binary has been loaded
-    /// On error or success `input` will contain a reference to the original
-    /// buffer supplied to `load_binary()`.
-    fn binary_load_done(&'a self, result: Result<(), ErrorCode>, input: &'static mut [u8]);
-
-    /// This callback is called when the data has been loaded
-    /// On error or success `data` will contain a reference to the original
-    /// buffer supplied to `load_data()`.
-    fn data_load_done(&'a self, result: Result<(), ErrorCode>, data: &'static mut [u8]);
-
     /// This callback is called when a operation is computed.
     /// On error or success `output` will contain a reference to the original
     /// data supplied to `run()`.
@@ -43,11 +33,12 @@ register_structs! {
         (0x1C => err_bits: ReadOnly<u32, ERR_BITS::Register>),
         (0x20 => fatal_alert_cause: ReadOnly<u32, FATAL_ALERT_CAUSE::Register>),
         (0x24 => insn_cnt: ReadWrite<u32>),
-        (0x28 => _reserved0),
+        (0x28 => load_checksum: ReadWrite<u32>),
+        (0x2C => _reserved0),
         (0x4000 => imem: [ReadWrite<u32>; 1024]),
         (0x5000 => _reserved1),
-        (0x8000 => dmem: [ReadWrite<u32>; 1024]),
-        (0x9000 => @END),
+        (0x8000 => dmem: [ReadWrite<u32>; 768]),
+        (0x8C00 => @END),
     }
 }
 
@@ -61,9 +52,9 @@ register_bitfields![u32,
     ],
     CMD [
         CMD OFFSET(0) NUMBITS(8) [
-            EXECUTE = 0x01,
-            SEC_WIPE_DMEM = 0x02,
-            SEC_WIPE_IMEM = 0x03,
+            EXECUTE = 0xD8,
+            SEC_WIPE_DMEM = 0xC3,
+            SEC_WIPE_IMEM = 0x1E,
         ],
     ],
     CTRL [
@@ -75,6 +66,7 @@ register_bitfields![u32,
             BUSY_EXECUTE = 0x01,
             BUSY_SEC_WIPE_DMEM = 0x02,
             BUSY_SEC_WIPE_IMEM = 0x03,
+            BUSY_SEC_WIPE_INT = 0x04,
             LOCKED = 0xFF,
         ],
     ],
@@ -84,22 +76,27 @@ register_bitfields![u32,
         CALL_STACK OFFSET(2) NUMBITS(1) [],
         ILLEGAL_INSN OFFSET(3) NUMBITS(1) [],
         LOOP_BIT OFFSET(4) NUMBITS(1) [],
+        KEY_INVAL OFFSET(5) NUMBITS(1) [],
+        RND_REP_CHK_FAIL OFFSET(6) NUMBITS(1) [],
+        RND_FIPS_CHK_FAIL OFFSET(7) NUMBITS(1) [],
         IMEM_INTG_VIOLATION OFFSET(16) NUMBITS(1) [],
         DMEM_INTG_VIOLATION OFFSET(17) NUMBITS(1) [],
         REG_INTG_VIOLATION OFFSET(18) NUMBITS(1) [],
         BUS_INTG_VIOLATION OFFSET(19) NUMBITS(1) [],
-        ILLEGAL_BUS_ACCESS OFFSET(20) NUMBITS(1) [],
-        LIFECYCLE_ESCALATION OFFSET(21) NUMBITS(1) [],
-        FATAL_SOFTWARE OFFSET(22) NUMBITS(1) [],
+        BAD_INTERNAL_STATE OFFSET(20) NUMBITS(1) [],
+        ILLEGAL_BUS_ACCESS OFFSET(21) NUMBITS(1) [],
+        LIFECYCLE_ESCALATION OFFSET(22) NUMBITS(1) [],
+        FATAL_SOFTWARE OFFSET(23) NUMBITS(1) [],
     ],
     FATAL_ALERT_CAUSE [
         IMEM_INTG_VIOLATION OFFSET(0) NUMBITS(1) [],
         DMEM_INTG_VIOLATION OFFSET(1) NUMBITS(1) [],
         REG_INTG_VIOLATION OFFSET(2) NUMBITS(1) [],
         BUS_INTG_VIOLATION OFFSET(3) NUMBITS(1) [],
-        ILLEGAL_BUS_ACCESS OFFSET(4) NUMBITS(1) [],
-        LIFECYCLE_ESCALATION OFFSET(5) NUMBITS(1) [],
-        FATAL_SOFTWARE OFFSET(6) NUMBITS(1) [],
+        BAD_INTERNAL_STATE OFFSET(4) NUMBITS(1) [],
+        ILLEGAL_BUS_ACCESS OFFSET(5) NUMBITS(1) [],
+        LIFECYCLE_ESCALATION OFFSET(6) NUMBITS(1) [],
+        FATAL_SOFTWARE OFFSET(7) NUMBITS(1) [],
     ],
 ];
 
@@ -107,33 +104,18 @@ pub struct Otbn<'a> {
     registers: StaticRef<OtbnRegisters>,
     client: OptionalCell<&'a dyn Client<'a>>,
 
-    in_buffer: Cell<Option<LeasableBuffer<'static, u8>>>,
-    data_buffer: TakeCell<'static, [u8]>,
     out_buffer: TakeCell<'static, [u8]>,
 
     copy_address: Cell<usize>,
-
-    add_data_deferred_call: Cell<bool>,
-    deferred_caller: &'static DynamicDeferredCall,
-    deferred_handle: OptionalCell<DeferredCallHandle>,
 }
 
 impl<'a> Otbn<'a> {
-    pub const fn new(
-        base: StaticRef<OtbnRegisters>,
-        deferred_caller: &'static DynamicDeferredCall,
-    ) -> Self {
+    pub fn new(base: StaticRef<OtbnRegisters>) -> Self {
         Otbn {
             registers: base,
             client: OptionalCell::empty(),
-            in_buffer: Cell::new(None),
-            data_buffer: TakeCell::empty(),
             out_buffer: TakeCell::empty(),
             copy_address: Cell::new(0),
-
-            add_data_deferred_call: Cell::new(false),
-            deferred_caller,
-            deferred_handle: OptionalCell::empty(),
         }
     }
 
@@ -156,7 +138,7 @@ impl<'a> Otbn<'a> {
 
             for i in 0..(out_buf.len() / 4) {
                 let idx = i * 4;
-                let d = self.registers.dmem[self.copy_address.get() + i]
+                let d = self.registers.dmem[self.copy_address.get() / 4 + i]
                     .get()
                     .to_ne_bytes();
 
@@ -172,10 +154,6 @@ impl<'a> Otbn<'a> {
         }
     }
 
-    pub fn initialise(&self, deferred_call_handle: DeferredCallHandle) {
-        self.deferred_handle.set(deferred_call_handle);
-    }
-
     /// Set the client instance which will receive
     pub fn set_client(&'a self, client: &'a dyn Client<'a>) {
         self.client.set(client);
@@ -187,16 +165,15 @@ impl<'a> Otbn<'a> {
     /// configure the accelerator.
     /// This function can be called multiple times if multiple binary blobs
     /// are required.
-    /// There is no guarantee the data has been written until the `binary_load_done()`
-    /// callback is fired.
     /// On error the return value will contain a return code and the original data
-    pub fn load_binary(
-        &self,
-        input: LeasableBuffer<'static, u8>,
-    ) -> Result<(), (ErrorCode, &'static mut [u8])> {
+    pub fn load_binary(&self, input: &[u8]) -> Result<(), ErrorCode> {
         if !self.registers.status.matches_all(STATUS::STATUS::IDLE) {
             // OTBN is performing an operation, we can't make any changes
-            return Err((ErrorCode::BUSY, input.take()));
+            return Err(ErrorCode::BUSY);
+        }
+        // Instruction memory is too large to fit
+        if (input.len() / 4) > self.registers.imem.len() {
+            return Err(ErrorCode::SIZE);
         }
 
         for i in 0..(input.len() / 4) {
@@ -210,25 +187,18 @@ impl<'a> Otbn<'a> {
             self.registers.imem[i].set(d);
         }
 
-        self.in_buffer.set(Some(input));
-
-        // Schedule a deferred call as there are no interrupts to monitor
-        // the binary loading.
-        self.add_data_deferred_call.set(true);
-        self.deferred_handle
-            .map(|handle| self.deferred_caller.set(*handle));
-
         Ok(())
     }
 
-    pub fn load_data(
-        &self,
-        address: usize,
-        data: &'static mut [u8],
-    ) -> Result<(), (ErrorCode, &'static mut [u8])> {
+    /// Load the data into the accelerator
+    /// This function can be called multiple times if multiple loads
+    /// are required.
+    /// On error the return value will contain a return code and the original data
+    /// The `data` buffer should be in little endian
+    pub fn load_data(&self, address: usize, data: &[u8]) -> Result<(), ErrorCode> {
         if !self.registers.status.matches_all(STATUS::STATUS::IDLE) {
             // OTBN is performing an operation, we can't make any changes
-            return Err((ErrorCode::BUSY, data));
+            return Err(ErrorCode::BUSY);
         }
 
         for i in 0..(data.len() / 4) {
@@ -241,14 +211,6 @@ impl<'a> Otbn<'a> {
 
             self.registers.dmem[(address / 4) + i].set(d);
         }
-
-        self.data_buffer.replace(data);
-
-        // Schedule a deferred call as there are no interrupts to monitor
-        // the binary loading.
-        self.add_data_deferred_call.set(true);
-        self.deferred_handle
-            .map(|handle| self.deferred_caller.set(*handle));
 
         Ok(())
     }
@@ -290,23 +252,8 @@ impl<'a> Otbn<'a> {
     /// Clear the keys and any other sensitive data.
     /// This won't clear the buffers provided to this API, that is up to the
     /// user to clear those.
-    pub fn clear_data(&self) {}
-}
-
-impl<'a> DynamicDeferredCallClient for Otbn<'a> {
-    fn call(&self, _handle: DeferredCallHandle) {
-        if self.add_data_deferred_call.get() {
-            self.add_data_deferred_call.set(false);
-
-            self.client.map(|client| {
-                self.in_buffer.take().map(|buffer| {
-                    client.binary_load_done(Ok(()), buffer.take());
-                });
-
-                self.data_buffer.take().map(|buffer| {
-                    client.data_load_done(Ok(()), buffer);
-                });
-            });
-        }
+    pub fn clear_data(&self) {
+        self.registers.cmd.write(CMD::CMD::SEC_WIPE_DMEM);
+        self.registers.cmd.write(CMD::CMD::SEC_WIPE_IMEM);
     }
 }

@@ -1,12 +1,16 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! High-level setup and interrupt mapping for the chip.
 
 use core::fmt::Write;
-use kernel;
+use core::ptr::addr_of;
 use kernel::debug;
 use kernel::platform::chip::InterruptService;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
 use rv32i::csr::{mcause, mie::mie, CSR};
-use rv32i::pmp::PMP;
+use rv32i::pmp::{kernel_protection::KernelProtectionPMP, PMPUserMPU};
 use rv32i::syscall::SysCall;
 
 use crate::interrupt_controller::VexRiscvInterruptController;
@@ -18,21 +22,25 @@ static mut INTERRUPT_CONTROLLER: VexRiscvInterruptController = VexRiscvInterrupt
 // The VexRiscv "Secure" variant of
 // [pythondata-cpu-vexriscv](https://github.com/litex-hub/pythondata-cpu-vexriscv)
 // has 16 PMP slots
-pub struct LiteXVexRiscv<I: 'static + InterruptService<()>> {
+pub struct LiteXVexRiscv<I: 'static + InterruptService> {
     soc_identifier: &'static str,
     userspace_kernel_boundary: SysCall,
     interrupt_controller: &'static VexRiscvInterruptController,
-    pmp: PMP<8>,
+    pmp_mpu: PMPUserMPU<4, KernelProtectionPMP<16>>,
     interrupt_service: &'static I,
 }
 
-impl<I: 'static + InterruptService<()>> LiteXVexRiscv<I> {
-    pub unsafe fn new(soc_identifier: &'static str, interrupt_service: &'static I) -> Self {
+impl<I: 'static + InterruptService> LiteXVexRiscv<I> {
+    pub unsafe fn new(
+        soc_identifier: &'static str,
+        interrupt_service: &'static I,
+        pmp: KernelProtectionPMP<16>,
+    ) -> Self {
         Self {
             soc_identifier,
             userspace_kernel_boundary: SysCall::new(),
-            interrupt_controller: &INTERRUPT_CONTROLLER,
-            pmp: PMP::new(),
+            interrupt_controller: &*addr_of!(INTERRUPT_CONTROLLER),
+            pmp_mpu: PMPUserMPU::new(pmp),
             interrupt_service,
         }
     }
@@ -51,12 +59,12 @@ impl<I: 'static + InterruptService<()>> LiteXVexRiscv<I> {
     }
 }
 
-impl<I: 'static + InterruptService<()>> kernel::platform::chip::Chip for LiteXVexRiscv<I> {
-    type MPU = PMP<8>;
+impl<I: 'static + InterruptService> kernel::platform::chip::Chip for LiteXVexRiscv<I> {
+    type MPU = PMPUserMPU<4, KernelProtectionPMP<16>>;
     type UserspaceKernelBoundary = SysCall;
 
     fn mpu(&self) -> &Self::MPU {
-        &self.pmp
+        &self.pmp_mpu
     }
 
     fn userspace_kernel_boundary(&self) -> &SysCall {
@@ -99,6 +107,7 @@ impl<I: 'static + InterruptService<()>> kernel::platform::chip::Chip for LiteXVe
             self.soc_identifier,
         ));
         rv32i::print_riscv_state(writer);
+        let _ = writer.write_fmt(format_args!("{}", self.pmp_mpu.pmp));
     }
 }
 
@@ -152,12 +161,12 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             //
             // If no interrupt was saved, reenable interrupts
             // immediately
-            if !INTERRUPT_CONTROLLER.save_pending() {
+            if !(*addr_of!(INTERRUPT_CONTROLLER)).save_pending() {
                 CSR.mie.modify(mie::mext::SET);
             }
         }
 
-        mcause::Interrupt::Unknown => {
+        mcause::Interrupt::Unknown(_) => {
             debug!("interrupt of unknown cause");
         }
     }
@@ -180,6 +189,7 @@ pub unsafe extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]

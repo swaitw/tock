@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use crate::error_codes::ErrorCode;
 use crate::flash_controller::FlashController;
 use crate::tickv::{TicKV, HASH_OFFSET, LEN_OFFSET, MAIN_KEY, VERSION, VERSION_OFFSET};
@@ -25,10 +29,10 @@ fn check_region_main(buf: &[u8]) {
     assert_eq!(buf[HASH_OFFSET + 7], 0x44);
 
     // Check the check hash
-    assert_eq!(buf[HASH_OFFSET + 8], 0x55);
-    assert_eq!(buf[HASH_OFFSET + 9], 0xb5);
-    assert_eq!(buf[HASH_OFFSET + 10], 0xd8);
-    assert_eq!(buf[HASH_OFFSET + 11], 0xe4);
+    assert_eq!(buf[HASH_OFFSET + 8], 0xbb);
+    assert_eq!(buf[HASH_OFFSET + 9], 0x32);
+    assert_eq!(buf[HASH_OFFSET + 10], 0x74);
+    assert_eq!(buf[HASH_OFFSET + 11], 0x1d);
 }
 
 fn check_region_one(buf: &[u8]) {
@@ -55,10 +59,44 @@ fn check_region_one(buf: &[u8]) {
     assert_eq!(buf[42], 0x23);
 
     // Check the check hash
-    assert_eq!(buf[43], 0xf7);
-    assert_eq!(buf[44], 0x1d);
-    assert_eq!(buf[45], 0xb3);
-    assert_eq!(buf[46], 0xe9);
+    assert_eq!(buf[43], 0xfd);
+    assert_eq!(buf[44], 0x24);
+    assert_eq!(buf[45], 0xf0);
+    assert_eq!(buf[46], 0x07);
+}
+
+fn check_region_one_zeroed(buf: &[u8]) {
+    // Check the version
+    assert_eq!(buf[VERSION_OFFSET], VERSION);
+
+    // Check the length
+    // The valid bit should be 0
+    assert_eq!(buf[LEN_OFFSET], 0x00);
+    assert_eq!(buf[LEN_OFFSET + 1], 47);
+
+    // Check the hash
+    assert_eq!(buf[HASH_OFFSET + 0], 0x81);
+    assert_eq!(buf[HASH_OFFSET + 1], 0x13);
+    assert_eq!(buf[HASH_OFFSET + 2], 0x7e);
+    assert_eq!(buf[HASH_OFFSET + 3], 0x95);
+    assert_eq!(buf[HASH_OFFSET + 4], 0x9e);
+    assert_eq!(buf[HASH_OFFSET + 5], 0x93);
+    assert_eq!(buf[HASH_OFFSET + 6], 0xaa);
+    assert_eq!(buf[HASH_OFFSET + 7], 0x3d);
+
+    // Check the value
+    assert_eq!(buf[HASH_OFFSET + 8], 0x00);
+    assert_eq!(buf[28], 0x00);
+    assert_eq!(buf[42], 0x00);
+
+    // Check the check hash
+    assert_eq!(buf[43], 0x00);
+    assert_eq!(buf[44], 0x00);
+    assert_eq!(buf[45], 0x00);
+    assert_eq!(buf[46], 0x00);
+
+    // Make sure we don't overwrite valid data
+    assert_eq!(buf.len(), 47);
 }
 
 fn check_region_two(buf: &[u8]) {
@@ -85,10 +123,10 @@ fn check_region_two(buf: &[u8]) {
     assert_eq!(buf[42], 0x23);
 
     // Check the check hash
-    assert_eq!(buf[43], 0x11);
-    assert_eq!(buf[44], 0x6a);
-    assert_eq!(buf[45], 0xba);
-    assert_eq!(buf[46], 0xba);
+    assert_eq!(buf[43], 0x1b);
+    assert_eq!(buf[44], 0x53);
+    assert_eq!(buf[45], 0xf9);
+    assert_eq!(buf[46], 0x54);
 }
 
 fn get_hashed_key(unhashed_key: &[u8]) -> u64 {
@@ -113,7 +151,6 @@ mod simple_flash_ctrl {
         fn read_region(
             &self,
             _region_number: usize,
-            _offset: usize,
             buf: &mut [u8; 2048],
         ) -> Result<(), ErrorCode> {
             for b in buf.iter_mut() {
@@ -142,7 +179,7 @@ mod simple_flash_ctrl {
         let hash = hash_function.finish();
 
         let tickv = TicKV::<FlashCtrl, 2048>::new(FlashCtrl::new(), &mut read_buf, 0x20000);
-        tickv.initalise(hash).unwrap();
+        tickv.initialise(hash).unwrap();
     }
 }
 
@@ -164,7 +201,6 @@ mod single_erase_flash_ctrl {
         fn read_region(
             &self,
             _region_number: usize,
-            _offset: usize,
             buf: &mut [u8; 2048],
         ) -> Result<(), ErrorCode> {
             for b in buf.iter_mut() {
@@ -197,11 +233,11 @@ mod single_erase_flash_ctrl {
         let hash = hash_function.finish();
 
         let tickv1 = TicKV::<FlashCtrl, 2048>::new(FlashCtrl::new(), &mut read_buf1, 0x20000);
-        tickv1.initalise(hash).unwrap();
+        tickv1.initialise(hash).unwrap();
 
         let mut read_buf2: [u8; 2048] = [0; 2048];
         let tickv2 = TicKV::<FlashCtrl, 2048>::new(FlashCtrl::new(), &mut read_buf2, 0x20000);
-        tickv2.initalise(hash).unwrap();
+        tickv2.initialise(hash).unwrap();
     }
 }
 
@@ -224,16 +260,11 @@ mod store_flast_ctrl {
     }
 
     impl FlashController<1024> for FlashCtrl {
-        fn read_region(
-            &self,
-            region_number: usize,
-            offset: usize,
-            buf: &mut [u8; 1024],
-        ) -> Result<(), ErrorCode> {
+        fn read_region(&self, region_number: usize, buf: &mut [u8; 1024]) -> Result<(), ErrorCode> {
             println!("Read from region: {}", region_number);
 
             for (i, b) in buf.iter_mut().enumerate() {
-                *b = self.buf.borrow()[region_number][offset + i]
+                *b = self.buf.borrow()[region_number][i]
             }
 
             Ok(())
@@ -261,6 +292,9 @@ mod store_flast_ctrl {
                 } else if self.run.get() == 2 {
                     println!("Writing key TWO: {:#x?}", buf);
                     check_region_two(buf);
+                } else if self.run.get() == 99 {
+                    println!("Checking the data is zeroed: {:#x?}", buf);
+                    check_region_one_zeroed(buf);
                 }
             }
 
@@ -289,7 +323,7 @@ mod store_flast_ctrl {
         let hash = hash_function.finish();
 
         let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(), &mut read_buf, 0x10000);
-        tickv.initalise(hash).unwrap();
+        tickv.initialise(hash).unwrap();
 
         let value: [u8; 32] = [0x23; 32];
 
@@ -305,7 +339,7 @@ mod store_flast_ctrl {
         let hash = hash_function.finish();
 
         let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(), &mut read_buf, 0x10000);
-        tickv.initalise(hash).unwrap();
+        tickv.initialise(hash).unwrap();
 
         let value: [u8; 32] = [0x23; 32];
         let mut buf: [u8; 32] = [0; 32];
@@ -350,7 +384,7 @@ mod store_flast_ctrl {
         let hash = hash_function.finish();
 
         let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(), &mut read_buf, 0x10000);
-        tickv.initalise(hash).unwrap();
+        tickv.initialise(hash).unwrap();
 
         let value: [u8; 32] = [0x23; 32];
         let mut buf: [u8; 32] = [0; 32];
@@ -378,6 +412,44 @@ mod store_flast_ctrl {
     }
 
     #[test]
+    fn test_append_and_delete_zeroise() {
+        let mut read_buf: [u8; 1024] = [0; 1024];
+        let mut hash_function = DefaultHasher::new();
+        MAIN_KEY.hash(&mut hash_function);
+        let hash = hash_function.finish();
+
+        let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(), &mut read_buf, 0x10000);
+        tickv.initialise(hash).unwrap();
+
+        let value: [u8; 32] = [0x23; 32];
+        let mut buf: [u8; 32] = [0; 32];
+
+        println!("Add Key ONE");
+        tickv.append_key(get_hashed_key(b"ONE"), &value).unwrap();
+
+        println!("Get key ONE");
+        tickv.get_key(get_hashed_key(b"ONE"), &mut buf).unwrap();
+
+        // Set an invalid value here to skip checking the key
+        tickv.controller.run.set(99);
+
+        println!("Zeroise Key ONE");
+        tickv.zeroise_key(get_hashed_key(b"ONE")).unwrap();
+
+        println!("Get non-existant key ONE");
+        assert_eq!(
+            tickv.get_key(get_hashed_key(b"ONE"), &mut buf),
+            Err(ErrorCode::KeyNotFound)
+        );
+
+        println!("Try to zeroise Key ONE Again");
+        assert_eq!(
+            tickv.zeroise_key(get_hashed_key(b"ONE")),
+            Err(ErrorCode::KeyNotFound)
+        );
+    }
+
+    #[test]
     fn test_garbage_collect() {
         let mut read_buf: [u8; 1024] = [0; 1024];
         let mut hash_function = DefaultHasher::new();
@@ -385,7 +457,7 @@ mod store_flast_ctrl {
         let hash = hash_function.finish();
 
         let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(), &mut read_buf, 0x10000);
-        tickv.initalise(hash).unwrap();
+        tickv.initialise(hash).unwrap();
 
         let value: [u8; 32] = [0x23; 32];
         let mut buf: [u8; 32] = [0; 32];
@@ -401,6 +473,47 @@ mod store_flast_ctrl {
 
         println!("Delete Key ONE");
         tickv.invalidate_key(get_hashed_key(b"ONE")).unwrap();
+
+        println!("Garbage collect flash with deleted key");
+        assert_eq!(tickv.garbage_collect(), Ok(1024));
+
+        println!("Get non-existant key ONE");
+        assert_eq!(
+            tickv.get_key(get_hashed_key(b"ONE"), &mut buf),
+            Err(ErrorCode::KeyNotFound)
+        );
+
+        println!("Add Key ONE");
+        tickv.append_key(get_hashed_key(b"ONE"), &value).unwrap();
+    }
+
+    #[test]
+    fn test_garbage_collect_zeroise() {
+        let mut read_buf: [u8; 1024] = [0; 1024];
+        let mut hash_function = DefaultHasher::new();
+        MAIN_KEY.hash(&mut hash_function);
+        let hash = hash_function.finish();
+
+        let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(), &mut read_buf, 0x10000);
+        tickv.initialise(hash).unwrap();
+
+        let value: [u8; 32] = [0x23; 32];
+        let mut buf: [u8; 32] = [0; 32];
+
+        println!("Garbage collect empty flash");
+        assert_eq!(tickv.garbage_collect(), Ok(0));
+
+        println!("Add Key ONE");
+        tickv.append_key(get_hashed_key(b"ONE"), &value).unwrap();
+
+        println!("Garbage collect flash with valid key");
+        assert_eq!(tickv.garbage_collect(), Ok(0));
+
+        // Set an invalid value here to skip checking the key
+        tickv.controller.run.set(99);
+
+        println!("Zeroise Key ONE");
+        tickv.zeroise_key(get_hashed_key(b"ONE")).unwrap();
 
         println!("Garbage collect flash with deleted key");
         assert_eq!(tickv.garbage_collect(), Ok(1024));
@@ -432,16 +545,11 @@ mod no_check_store_flast_ctrl {
     }
 
     impl FlashController<256> for FlashCtrl {
-        fn read_region(
-            &self,
-            region_number: usize,
-            offset: usize,
-            buf: &mut [u8; 256],
-        ) -> Result<(), ErrorCode> {
+        fn read_region(&self, region_number: usize, buf: &mut [u8; 256]) -> Result<(), ErrorCode> {
             println!("Read from region: {}", region_number);
 
             for (i, b) in buf.iter_mut().enumerate() {
-                *b = self.buf.borrow()[region_number][offset + i]
+                *b = self.buf.borrow()[region_number][i]
             }
 
             Ok(())
@@ -480,7 +588,7 @@ mod no_check_store_flast_ctrl {
         let hash = hash_function.finish();
 
         let tickv = TicKV::<FlashCtrl, 256>::new(FlashCtrl::new(), &mut read_buf, 0x200);
-        tickv.initalise(hash).unwrap();
+        tickv.initialise(hash).unwrap();
 
         let value: [u8; 64] = [0x23; 64];
         let mut buf: [u8; 64] = [0; 64];

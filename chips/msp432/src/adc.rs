@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Analog-Digital Converter (ADC)
 
 use crate::{dma, ref_module, timer};
@@ -486,11 +490,6 @@ register_bitfields![u32,
     ]
 ];
 
-/// Create a trait of both client types to allow a single client reference to
-/// act as both
-pub trait EverythingClient: hil::adc::Client + hil::adc::HighSpeedClient {}
-impl<C: hil::adc::Client + hil::adc::HighSpeedClient> EverythingClient for C {}
-
 pub struct Adc<'a> {
     registers: StaticRef<AdcRegisters>,
     resolution: AdcResolution,
@@ -503,11 +502,12 @@ pub struct Adc<'a> {
     dma_src: u8,
     buffer1: TakeCell<'static, [u16]>,
     buffer2: TakeCell<'static, [u16]>,
-    client: OptionalCell<&'static dyn EverythingClient>,
+    client: OptionalCell<&'a dyn hil::adc::Client>,
+    highspeed_client: OptionalCell<&'a dyn hil::adc::HighSpeedClient>,
 }
 
 impl Adc<'_> {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             registers: ADC_BASE,
             resolution: DEFAULT_ADC_RESOLUTION,
@@ -521,6 +521,7 @@ impl Adc<'_> {
             buffer1: TakeCell::empty(),
             buffer2: TakeCell::empty(),
             client: OptionalCell::empty(),
+            highspeed_client: OptionalCell::empty(),
         }
     }
 }
@@ -624,46 +625,44 @@ impl<'a> Adc<'a> {
         self.registers.ie0.set(0);
 
         // Clear all pending interrupts
-        self.registers.clrifg0.set(core::u32::MAX);
-        self.registers.clrifg1.set(core::u32::MAX);
+        self.registers.clrifg0.set(u32::MAX);
+        self.registers.clrifg1.set(u32::MAX);
     }
 
     fn setup(&self) {
         self.stop();
 
         for i in 0..AVAILABLE_ADC_CHANNELS {
+            // Set the input for the channel
+            // Set Reference voltage to Internal AVCC for Vref+ and AVSS (GND) for Vref-
+            // Configure the channel for single-ended mode
+            // Disable comparator window
             self.registers.mctl[i].modify(
-                // Set the input for the channel
                 MCTLx::INCHx.val(i as u32)
-                // Set Reference voltage to Internal AVCC for Vref+ and AVSS (GND) for Vref-
-                + MCTLx::VRSEL::AvccAvss
-                // Configure the channel for single-ended mode
-                + MCTLx::DIF::SingleEnded
-                // Disable comparator window
-                + MCTLx::WINC::CLEAR,
+                    + MCTLx::VRSEL::AvccAvss
+                    + MCTLx::DIF::SingleEnded
+                    + MCTLx::WINC::CLEAR,
             );
         }
 
+        // Set predivider of the ADC-clock to 1
+        // Set divider of the ADC-clock to 1
+        // Set ADC-clock source to HSMCLK
+        // Set the sample-and-hold time to 4 clock-cyles for channel 0-7 and 24-31
+        // Set the sample-and-hold time to 4 clock-cyles for channel 8-23
         self.registers.ctl0.modify(
-            // Set predivider of the ADC-clock to 1
             CTL0::PDIV::PreDivideBy1
-            // Set divider of the ADC-clock to 1
-            + CTL0::DIVx::DivideBy1
-            // Set ADC-clock source to HSMCLK
-            + CTL0::SSELx::HSMCLK
-            // Set the sample-and-hold time to 4 clock-cyles for channel 0-7 and 24-31
-            + CTL0::SHTOx::Cycles4
-            // Set the sample-and-hold time to 4 clock-cyles for channel 8-23
-            + CTL0::SHT1x::Cycles4,
+                + CTL0::DIVx::DivideBy1
+                + CTL0::SSELx::HSMCLK
+                + CTL0::SHTOx::Cycles4
+                + CTL0::SHT1x::Cycles4,
         );
 
+        // Enable the battery monitor on channel 23 (measures 1/2 * AVCC)
+        // Enable the internal temperature sensor on channel 22
+        // Set the ADC resolution
         self.registers.ctl1.modify(
-            // Enable the battery monitor on channel 23 (measures 1/2 * AVCC)
-            CTL1::BATMAP::Selected
-            // Enable the internal temperature sensor on channel 22
-            + CTL1::TCMAP::Selected
-            // Set the ADC resolution
-            + CTL1::RES.val(self.resolution as u32),
+            CTL1::BATMAP::Selected + CTL1::TCMAP::Selected + CTL1::RES.val(self.resolution as u32),
         );
 
         let dma_conf = dma::DmaConfig {
@@ -712,10 +711,6 @@ impl<'a> Adc<'a> {
         self.dma.set(dma);
     }
 
-    pub fn set_client(&self, client: &'static dyn EverythingClient) {
-        self.client.set(client);
-    }
-
     pub fn handle_interrupt(&self) {
         let chan = self.active_channel.get();
         let chan_nr = chan as usize;
@@ -733,15 +728,12 @@ impl<'a> Adc<'a> {
 
                 // Stop sampling
                 self.registers.ctl0.modify(CTL0::ENC::CLEAR);
-
-                // Throw callback
-                self.client
-                    .map(move |client| client.sample_ready(self.get_sample(chan)));
-            } else if mode == AdcMode::Repeated {
-                // Throw callback
-                self.client
-                    .map(move |client| client.sample_ready(self.get_sample(chan)));
             }
+
+            // Throw callback
+            self.client.map(|client| {
+                client.sample_ready(self.get_sample(chan));
+            });
         } else {
             panic!("ADC: unhandled interrupt: channel {}", chan_nr);
         }
@@ -766,12 +758,14 @@ impl dma::DmaClient for Adc<'_> {
                 buf[i] <<= shift;
             }
 
-            self.client.map(move |cl| cl.samples_ready(buf, samples));
+            self.highspeed_client.map(|client| {
+                client.samples_ready(buf, samples);
+            });
         }
     }
 }
 
-impl hil::adc::Adc for Adc<'_> {
+impl<'a> hil::adc::Adc<'a> for Adc<'a> {
     type Channel = Channel;
 
     fn sample(&self, channel: &Self::Channel) -> Result<(), ErrorCode> {
@@ -793,17 +787,17 @@ impl hil::adc::Adc for Adc<'_> {
 
         self.enable_interrupt(*channel);
 
+        // Set ADC to mode where a single channel gets sampled once
+        // Set the sample-and-hold source select to software-based
+        // Set the sampling-timer for generating the sample-period
+        // Enable conversation
+        // Start conversation
         self.registers.ctl0.modify(
-            // Set ADC to mode where a single channel gets sampled once
             CTL0::CONSEQx::SingleChannelSingleConversion
-            // Set the sample-and-hold source select to software-based
-            + CTL0::SHSx::SCBit
-            // Set the sampling-timer for generating the sample-period
-            + CTL0::SHP::SET
-            // Enable conversation
-            + CTL0::ENC::SET
-            // Start conversation
-            + CTL0::SC::SET,
+                + CTL0::SHSx::SCBit
+                + CTL0::SHP::SET
+                + CTL0::ENC::SET
+                + CTL0::SC::SET,
         );
 
         Ok(())
@@ -838,17 +832,17 @@ impl hil::adc::Adc for Adc<'_> {
 
         self.enable_interrupt(*channel);
 
+        // Set ADC to mode where a single channel gets sampled continuously
+        // Set the sample-and-hold source select to timer-triggered
+        // Use TIMER_A3 to generate the SAMPCON signal
+        // Enable multiple sample and conversions
+        // Enable conversation
         self.registers.ctl0.modify(
-            // Set ADC to mode where a single channel gets sampled continuously
             CTL0::CONSEQx::RepeatSingleChannel
-            // Set the sample-and-hold source select to timer-triggered
-            + CTL0::SHSx::Source7
-            // Use TIMER_A3 to generate the SAMPCON signal
-            + CTL0::SHP::CLEAR
-            // Enable multiple sample and conversions
-            + CTL0::MSC::SET
-            // Enable conversation
-            + CTL0::ENC::SET,
+                + CTL0::SHSx::Source7
+                + CTL0::SHP::CLEAR
+                + CTL0::MSC::SET
+                + CTL0::ENC::SET,
         );
 
         Ok(())
@@ -896,12 +890,12 @@ impl hil::adc::Adc for Adc<'_> {
         self.ref_module.map(|ref_mod| ref_mod.ref_voltage_mv())
     }
 
-    fn set_client(&self, _client: &'static dyn hil::adc::Client) {
-        unimplemented!();
+    fn set_client(&self, client: &'a dyn hil::adc::Client) {
+        self.client.set(client);
     }
 }
 
-impl hil::adc::AdcHighSpeed for Adc<'_> {
+impl<'a> hil::adc::AdcHighSpeed<'a> for Adc<'a> {
     fn sample_highspeed(
         &self,
         channel: &Self::Channel,
@@ -932,20 +926,22 @@ impl hil::adc::AdcHighSpeed for Adc<'_> {
             .ctl1
             .modify(CTL1::STARTADDx.val(*channel as u32));
 
+        // Set ADC to mode where a single channel gets sampled continuously
+        // Set the sample-and-hold source select to timer-triggered
+        // Use TIMER_A3 to generate the SAMPCON signal
+        // Enable multiple sample and conversions
+        // Enable conversation
         self.registers.ctl0.modify(
-            // Set ADC to mode where a single channel gets sampled continuously
             CTL0::CONSEQx::RepeatSingleChannel
-            // Set the sample-and-hold source select to timer-triggered
-            + CTL0::SHSx::Source7
-            // Use TIMER_A3 to generate the SAMPCON signal
-            + CTL0::SHP::CLEAR
-            // Enable multiple sample and conversions
-            + CTL0::MSC::SET
-            // Enable conversation
-            + CTL0::ENC::SET,
+                + CTL0::SHSx::Source7
+                + CTL0::SHP::CLEAR
+                + CTL0::MSC::SET
+                + CTL0::ENC::SET,
         );
 
-        let adc_reg = &self.registers.mem[*channel as usize] as *const ReadWrite<u32> as *const ();
+        let adc_reg =
+            (core::ptr::from_ref::<ReadWrite<u32>>(&self.registers.mem[*channel as usize]))
+                .cast::<()>();
 
         // Convert the [u16] into an [u8] since the DMA works only with [u8]
         let buf1 = unsafe { buf_u16_to_buf_u8(buffer1) };
@@ -996,5 +992,9 @@ impl hil::adc::AdcHighSpeed for Adc<'_> {
         } else {
             Ok((self.buffer1.take(), self.buffer2.take()))
         }
+    }
+
+    fn set_highspeed_client(&self, client: &'a dyn hil::adc::HighSpeedClient) {
+        self.highspeed_client.set(client);
     }
 }

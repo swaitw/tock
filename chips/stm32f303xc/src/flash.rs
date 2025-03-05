@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Embedded Flash Memory Controller
 //!
 //! Used for reading, writing and erasing the flash and the option bytes.
@@ -11,7 +15,7 @@
 
 use core::cell::Cell;
 use core::ops::{Index, IndexMut};
-use kernel::deferred_call::DeferredCall;
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
@@ -21,8 +25,6 @@ use kernel::utilities::registers::register_bitfields;
 use kernel::utilities::registers::{ReadOnly, ReadWrite, WriteOnly};
 use kernel::utilities::StaticRef;
 use kernel::ErrorCode;
-
-use crate::deferred_call_tasks::DeferredCallTask;
 
 const FLASH_BASE: StaticRef<FlashRegisters> =
     unsafe { StaticRef::new(0x40022000 as *const FlashRegisters) };
@@ -207,9 +209,6 @@ register_bitfields! [u32,
     ]
 ];
 
-static DEFERRED_CALL: DeferredCall<DeferredCallTask> =
-    unsafe { DeferredCall::new(DeferredCallTask::Flash) };
-
 const PAGE_SIZE: usize = 2048;
 
 /// Address of the first flash page.
@@ -235,13 +234,11 @@ const KEY2: u32 = 0xCDEF89AB;
 ///
 /// let pagebuffer = unsafe { static_init!(StmF303Page, StmF303Page::default()) };
 /// ```
-pub struct StmF303Page(pub [u8; PAGE_SIZE as usize]);
+pub struct StmF303Page(pub [u8; PAGE_SIZE]);
 
 impl Default for StmF303Page {
     fn default() -> Self {
-        Self {
-            0: [0; PAGE_SIZE as usize],
-        }
+        Self([0; PAGE_SIZE])
     }
 }
 
@@ -288,10 +285,11 @@ pub struct Flash {
     state: Cell<FlashState>,
     write_counter: Cell<usize>,
     page_number: Cell<usize>,
+    deferred_call: DeferredCall,
 }
 
 impl Flash {
-    pub const fn new() -> Flash {
+    pub fn new() -> Flash {
         Flash {
             registers: FLASH_BASE,
             client: OptionalCell::empty(),
@@ -299,6 +297,7 @@ impl Flash {
             state: Cell::new(FlashState::Ready),
             write_counter: Cell::new(0),
             page_number: Cell::new(0),
+            deferred_call: DeferredCall::new(),
         }
     }
 
@@ -351,7 +350,7 @@ impl Flash {
 
                         self.client.map(|client| {
                             self.buffer.take().map(|buffer| {
-                                client.write_complete(buffer, hil::flash::Error::CommandComplete);
+                                client.write_complete(buffer, Ok(()));
                             });
                         });
                     } else {
@@ -369,7 +368,7 @@ impl Flash {
 
                     self.state.set(FlashState::Ready);
                     self.client.map(|client| {
-                        client.erase_complete(hil::flash::Error::CommandComplete);
+                        client.erase_complete(Ok(()));
                     });
                 }
                 FlashState::WriteOption => {
@@ -378,7 +377,7 @@ impl Flash {
 
                     self.client.map(|client| {
                         self.buffer.take().map(|buffer| {
-                            client.write_complete(buffer, hil::flash::Error::CommandComplete);
+                            client.write_complete(buffer, Ok(()));
                         });
                     });
                 }
@@ -387,7 +386,7 @@ impl Flash {
                     self.state.set(FlashState::Ready);
 
                     self.client.map(|client| {
-                        client.erase_complete(hil::flash::Error::CommandComplete);
+                        client.erase_complete(Ok(()));
                     });
                 }
                 _ => {}
@@ -398,7 +397,7 @@ impl Flash {
             self.state.set(FlashState::Ready);
             self.client.map(|client| {
                 self.buffer.take().map(|buffer| {
-                    client.read_complete(buffer, hil::flash::Error::CommandComplete);
+                    client.read_complete(buffer, Ok(()));
                 });
             });
         }
@@ -412,13 +411,13 @@ impl Flash {
                     self.registers.cr.modify(Control::PG::CLEAR);
                     self.client.map(|client| {
                         self.buffer.take().map(|buffer| {
-                            client.write_complete(buffer, hil::flash::Error::FlashError);
+                            client.write_complete(buffer, Err(hil::flash::Error::FlashError));
                         });
                     });
                 }
                 FlashState::Erase => {
                     self.client.map(|client| {
-                        client.erase_complete(hil::flash::Error::FlashError);
+                        client.erase_complete(Err(hil::flash::Error::FlashError));
                     });
                 }
                 _ => {}
@@ -436,7 +435,7 @@ impl Flash {
                     self.registers.cr.modify(Control::PG::CLEAR);
                     self.client.map(|client| {
                         self.buffer.take().map(|buffer| {
-                            client.write_complete(buffer, hil::flash::Error::FlashError);
+                            client.write_complete(buffer, Err(hil::flash::Error::FlashError));
                         });
                     });
                 }
@@ -444,13 +443,13 @@ impl Flash {
                     self.registers.cr.modify(Control::OPTPG::CLEAR);
                     self.client.map(|client| {
                         self.buffer.take().map(|buffer| {
-                            client.write_complete(buffer, hil::flash::Error::FlashError);
+                            client.write_complete(buffer, Err(hil::flash::Error::FlashError));
                         });
                     });
                 }
                 FlashState::Erase => {
                     self.client.map(|client| {
-                        client.erase_complete(hil::flash::Error::FlashError);
+                        client.erase_complete(Err(hil::flash::Error::FlashError));
                     });
                 }
                 _ => {}
@@ -556,7 +555,7 @@ impl Flash {
 
         self.buffer.replace(buffer);
         self.state.set(FlashState::Read);
-        DEFERRED_CALL.set();
+        self.deferred_call.set();
 
         Ok(())
     }
@@ -601,6 +600,16 @@ impl Flash {
         self.registers.cr.modify(Control::STRT::SET);
 
         Ok(())
+    }
+}
+
+impl DeferredCallClient for Flash {
+    fn register(&'static self) {
+        self.deferred_call.register(self);
+    }
+
+    fn handle_deferred_call(&self) {
+        self.handle_interrupt();
     }
 }
 

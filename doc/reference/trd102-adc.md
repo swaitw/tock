@@ -49,7 +49,7 @@ either one-shot or repeatedly. It is implemented by chip drivers to provide ADC
 functionality. Data is provided through the Client trait. It has four functions
 and one associated type:
 
-```
+```rust
 /// Simple interface for reading an ADC sample on any channel.
 pub trait Adc {
     /// The chip-dependent type of an ADC channel.
@@ -73,6 +73,8 @@ pub trait Adc {
     /// Can be used to stop any simple or high-speed sampling operation. No
     /// further callbacks will occur.
     fn stop_sampling(&self) -> Result<(), ErrorCode>;
+
+    fn set_client(&self, client: &'static dyn Client);
 }
 ```
 
@@ -122,7 +124,7 @@ from by userland applications.
 The Client trait handles responses from Adc trait sampling commands. It is
 implemented by capsules to receive chip driver responses. It has one function:
 
-```
+```rust
 /// Trait for handling callbacks from simple ADC calls.
 pub trait Client {
     /// Called when a sample is ready.
@@ -145,12 +147,12 @@ The AdcHighSpeed trait is used for sampling data at high frequencies such that
 receiving individual samples would be untenable. Instead, it provides an
 interface that returns buffers filled with samples. This trait relies on the
 Adc trait being implemented as well in order to provide primitives like
-`intialize` and `stop_sampling` which are used for ADCs in this mode as well.
+`initialize` and `stop_sampling` which are used for ADCs in this mode as well.
 While we expect many chips to support the Adc trait, we expect the AdcHighSpeed
 trait to be implemented due to a high-speed sampling need on a platform. The
 trait has three functions:
 
-```
+```rust
 /// Interface for continuously sampling at a given frequency on a channel.
 /// Requires the AdcSimple interface to have been implemented as well.
 pub trait AdcHighSpeed: Adc {
@@ -192,6 +194,8 @@ pub trait AdcHighSpeed: Adc {
     fn retrieve_buffers(&self)
                         -> (Result<(), ErrorCode>, Option<&'static mut [u16]>,
                             Option<&'static mut [u16]>);
+
+    fn set_highspeed_client(&self, client: &'static dyn HighSpeedClient);
 }
 ```
 
@@ -236,7 +240,7 @@ The HighSpeedClient trait is used to receive samples from a call to
 `sample_highspeed`. It is implemented by a capsule to receive chip driver
 responses. It has one function:
 
-```
+```rust
 /// Trait for handling callbacks from high-speed ADC calls.
 pub trait HighSpeedClient {
     /// Called when a buffer is full.
@@ -279,7 +283,7 @@ SAM4L implementation creates an AdcChannel struct which contains and enum
 defining its value. Each possible ADC channel is then statically created. Other
 chips may want to consider a similar system.
 
-```
+```rust
 /// Representation of an ADC channel on the SAM4L.
 pub struct AdcChannel {
     chan_num: u32,
@@ -317,19 +321,16 @@ pub static mut CHANNEL_AD1: AdcChannel = AdcChannel::new(Channel::AD1);
 pub static mut CHANNEL_REFERENCE_GROUND: AdcChannel = AdcChannel::new(Channel::ReferenceGround);
 ```
 
-6.2 Client Type
+6.2 Client Handling
 ---------------------------------
 
-It is difficult in Rust to require a argument that implements two types.
-However, it is convenient for the implementation to expect a single client that
-implements both the `adc::Client` and `adc::HighSpeedClient` interfaces. It is
-possible to do so by defining a new trait that requires each.
+As ADC functionality is split between two traits, there are two callback traits.
+ADC driver implementations that use both `Adc` and `AdcHighSpeed` need two
+clients, which must both be set:
 
-```
-/// Create a trait of both client types to allow a single client reference to
-/// act as both
-pub trait EverythingClient: hil::adc::Client + hil::adc::HighSpeedClient {}
-impl<C: hil::adc::Client + hil::adc::HighSpeedClient> EverythingClient for C {}
+```rust
+hil::adc::Adc::set_client(&peripherals.adc, adc);
+hil::adc::AdcHighSpeed::set_client(&peripherals.adc, adc);
 ```
 
 6.3 Clock Initialization

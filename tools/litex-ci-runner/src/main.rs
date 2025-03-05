@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use rexpect::errors::Error;
 use rexpect::process::signal::Signal;
 use rexpect::session::PtySession;
@@ -186,7 +190,7 @@ fn run() -> Result<(), Error> {
     // should return that.
     //
     // Tests parts of the UART stack and the LiteX UART driver.
-    libtock_c_examples_test(&["tests/console_timeout"], |p, _| {
+    libtock_c_examples_test(&["tests/console/console_timeout"], |p, _| {
         p.send_line("Tock is awesome!")?;
         p.exp_string("Userspace call to read console returned: Tock is awesome!")?;
         Ok(())
@@ -208,7 +212,7 @@ fn run() -> Result<(), Error> {
     // "press" the overrun button. Once we receive the message that the
     // application will walk a region, it's already too late for that. Thus the
     // button is pressed immediately after the start of the prior run.
-    libtock_c_examples_test(&["tests/mpu_walk_region"], |p, gpio| {
+    libtock_c_examples_test(&["tests/mpu/mpu_walk_region"], |p, gpio| {
         p.exp_string("[TEST] MPU Walk Regions")?;
 
         // Start walking the entire flash region, should not panic
@@ -251,7 +255,7 @@ fn run() -> Result<(), Error> {
     //
     // Tests whether an overrun of the RAM region will trigger a process fault
     // by the MPU because of a load page fault.
-    libtock_c_examples_test(&["tests/mpu_walk_region"], |p, gpio| {
+    libtock_c_examples_test(&["tests/mpu/mpu_walk_region"], |p, gpio| {
         p.exp_string("[TEST] MPU Walk Regions")?;
 
         // Start walking the entire flash region.
@@ -315,7 +319,7 @@ fn run() -> Result<(), Error> {
     // Test: rot13_client and rot13_service
     //
     // Tests IPC and IPC service discovery.
-    libtock_c_examples_test(&["rot13_service", "rot13_client"], |p, _| {
+    libtock_c_examples_test(&["rot13_client", "rot13_service"], |p, _| {
         // Let run for a few cycles to make sure it doesn't crash
         // after the first few messages
         for _ in 0..10 {

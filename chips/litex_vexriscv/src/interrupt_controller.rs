@@ -1,7 +1,10 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! VexRiscv-specific interrupt controller implementation
 
 use core::cell::Cell;
-use core::mem::size_of;
 
 /// Rust wrapper around the raw CSR-based VexRiscv interrupt
 /// controller
@@ -42,7 +45,7 @@ impl VexRiscvInterruptController {
     /// having a higher priority.
     pub fn next_saved(&self) -> Option<usize> {
         let saved_interrupts: usize = self.saved_interrupts.get();
-        let interrupt_bits = size_of::<usize>() * 8;
+        let interrupt_bits = usize::BITS as usize;
 
         // If there are no interrupts pending (saved_interrupts == 0),
         // usize::trailing_zeros will return usize::BITS, in which
@@ -99,34 +102,37 @@ mod vexriscv_irq_raw {
     /// defined in litex/soc/cores/cpu/vexriscv/csr-defs.h
     const CSR_IRQ_PENDING: usize = 0xFC0;
 
-    #[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+    #[cfg(not(any(doc, all(target_arch = "riscv32", target_os = "none"))))]
     pub unsafe fn irq_getmask() -> usize {
         0
     }
 
-    #[cfg(all(target_arch = "riscv32", target_os = "none"))]
+    #[cfg(any(doc, all(target_arch = "riscv32", target_os = "none")))]
     pub unsafe fn irq_getmask() -> usize {
         let mask: usize;
+        use core::arch::asm;
         asm!("csrr {mask}, {csr}", mask = out(reg) mask, csr = const CSR_IRQ_MASK);
         mask
     }
 
-    #[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+    #[cfg(not(any(doc, all(target_arch = "riscv32", target_os = "none"))))]
     pub unsafe fn irq_setmask(_mask: usize) {}
 
-    #[cfg(all(target_arch = "riscv32", target_os = "none"))]
+    #[cfg(any(doc, all(target_arch = "riscv32", target_os = "none")))]
     pub unsafe fn irq_setmask(mask: usize) {
+        use core::arch::asm;
         asm!("csrw {csr}, {mask}", csr = const CSR_IRQ_MASK, mask = in(reg) mask);
     }
 
-    #[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+    #[cfg(not(any(doc, all(target_arch = "riscv32", target_os = "none"))))]
     pub unsafe fn irq_pending() -> usize {
         0
     }
 
-    #[cfg(all(target_arch = "riscv32", target_os = "none"))]
+    #[cfg(any(doc, all(target_arch = "riscv32", target_os = "none")))]
     pub unsafe fn irq_pending() -> usize {
         let pending: usize;
+        use core::arch::asm;
         asm!("csrr {pending}, {csr}", pending = out(reg) pending, csr = const CSR_IRQ_PENDING);
         pending
     }

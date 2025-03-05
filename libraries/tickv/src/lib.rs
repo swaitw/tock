@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! # TicKV
 //!
 //! TicKV (Tiny Circular Key Value) is a small file system allowing
@@ -118,10 +122,10 @@
 //! }
 //!
 //! impl FlashController<1024> for FlashCtrl {
-//!     fn read_region(&self, region_number: usize, offset: usize, buf: &mut [u8; 1024]) -> Result<(), ErrorCode> {
+//!     fn read_region(&self, region_number: usize, buf: &mut [u8; 1024]) -> Result<(), ErrorCode> {
 //!         // TODO: Read the specified flash region
 //!         for (i, b) in buf.iter_mut().enumerate() {
-//!             *b = self.buf.borrow()[region_number][offset + i]
+//!             *b = self.buf.borrow()[region_number][i]
 //!         }
 //!         Ok(())
 //!     }
@@ -148,7 +152,7 @@
 //! let tickv = TicKV::<FlashCtrl, 1024>::new(FlashCtrl::new(),
 //!                   &mut read_buf, 0x1000);
 //! tickv
-//!    .initalise(hash_function.finish())
+//!    .initialise(hash_function.finish())
 //!    .unwrap();
 //!
 //! // Add a key
@@ -208,7 +212,7 @@
 #![deny(missing_docs)]
 
 pub mod async_ops;
-mod crc32;
+pub mod crc32;
 pub mod error_codes;
 pub mod flash_controller;
 pub mod success_codes;

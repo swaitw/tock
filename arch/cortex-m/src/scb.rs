@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! ARM System Control Block
 //!
 //! <http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0553a/CIHFDJCA.html>
@@ -110,7 +114,7 @@ register_bitfields![u32,
         /// WO.
         PENDSTCLR       OFFSET(25)  NUMBITS(1),
 
-        /// Whether an excpetion will be serviced when existing debug state.
+        /// Whether an exception will be serviced when existing debug state.
         /// RO.
         ISRPREEMPT      OFFSET(23)  NUMBITS(1),
 
@@ -271,9 +275,25 @@ const SCB: StaticRef<ScbRegisters> = unsafe { StaticRef::new(0xE000ED00 as *cons
 /// Allow the core to go into deep sleep on WFI.
 ///
 /// The specific definition of "deep sleep" is chip specific.
+#[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
 pub unsafe fn set_sleepdeep() {
+    use core::arch::asm;
+
     SCB.scr.modify(SystemControl::SLEEPDEEP::SET);
+
+    asm!("dsb", "isb", options(nomem, nostack, preserves_flags));
 }
+
+// Mock implementation for tests on Travis-CI.
+#[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
+pub unsafe fn set_sleepdeep() {
+    // Dummy operation to satisfy the `Writable` trait import on
+    // non-ARM platforms.
+    SCB.scr.modify(SystemControl::SLEEPDEEP::SET);
+
+    unimplemented!()
+}
+
 /// Do not allow the core to go into deep sleep on WFI.
 ///
 /// The specific definition of "deep sleep" is chip specific.
@@ -296,8 +316,9 @@ pub unsafe fn set_vector_table_offset(offset: *const ()) {
 }
 
 /// Disable the FPU
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(any(doc, all(target_arch = "arm", target_os = "none")))]
 pub unsafe fn disable_fpca() {
+    use core::arch::asm;
     SCB.cpacr
         .modify(CoprocessorAccessControl::CP10::CLEAR + CoprocessorAccessControl::CP11::CLEAR);
 
@@ -311,7 +332,7 @@ pub unsafe fn disable_fpca() {
 }
 
 // Mock implementation for tests on Travis-CI.
-#[cfg(not(any(target_arch = "arm", target_os = "none")))]
+#[cfg(not(any(doc, all(target_arch = "arm", target_os = "none"))))]
 pub unsafe fn disable_fpca() {
     // Dummy read register, to satisfy the `Readable` trait import on
     // non-ARM platforms.

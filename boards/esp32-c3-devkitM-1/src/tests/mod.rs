@@ -1,8 +1,11 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use crate::BOARD;
 use crate::CHIP;
 use crate::MAIN_CAP;
 use crate::PLATFORM;
-use crate::{NUM_PROCS, NUM_UPCALLS_IPC};
 use kernel::debug;
 
 fn run_kernel_op(loops: usize) {
@@ -11,7 +14,7 @@ fn run_kernel_op(loops: usize) {
             BOARD.unwrap().kernel_loop_operation(
                 PLATFORM.unwrap(),
                 CHIP.unwrap(),
-                None::<&kernel::ipc::IPC<NUM_PROCS, NUM_UPCALLS_IPC>>,
+                None::<&kernel::ipc::IPC<0>>,
                 true,
                 MAIN_CAP.unwrap(),
             );
@@ -22,12 +25,12 @@ fn run_kernel_op(loops: usize) {
 #[test_case]
 fn trivial_assertion() {
     debug!("trivial assertion... ");
-    run_kernel_op(100);
+    run_kernel_op(10000);
 
     assert_eq!(1, 1);
 
     debug!("    [ok]");
-    run_kernel_op(100);
+    run_kernel_op(10000);
 }
 
 mod multi_alarm;

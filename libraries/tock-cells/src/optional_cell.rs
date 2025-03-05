@@ -1,10 +1,13 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! `OptionalCell` convenience type
 
 use core::cell::Cell;
 
 /// `OptionalCell` is a `Cell` that wraps an `Option`. This is helper type
 /// that makes keeping types that can be `None` a little cleaner.
-#[derive(Default)]
 pub struct OptionalCell<T> {
     value: Cell<Option<T>>,
 }
@@ -71,7 +74,10 @@ impl<T> OptionalCell<T> {
         T: PartialEq,
     {
         let value = self.value.take();
-        let out = value.contains(x);
+        let out = match &value {
+            Some(y) => y == x,
+            None => false,
+        };
         self.value.set(value);
         out
     }
@@ -149,7 +155,35 @@ impl<T> OptionalCell<T> {
 
 impl<T: Copy> OptionalCell<T> {
     /// Returns a copy of the contained [`Option`].
-    pub fn extract(&self) -> Option<T> {
+    //
+    // This was originally introduced in PR #2531 [1], then renamed to `extract`
+    // in PR #2533 [2], and finally renamed back in PR #3536 [3].
+    //
+    // The rationale for including a `get` method is to allow developers to
+    // treat an `OptionalCell<T>` as what it is underneath: a `Cell<Option<T>>`.
+    // This is useful to be interoperable with APIs that take an `Option<T>`, or
+    // to use an *if-let* or *match* expression to perform case-analysis on the
+    // `OptionalCell`'s state: this avoids using a closure and can thus allow
+    // Rust to deduce that only a single branch will ever be entered (either the
+    // `Some(_)` or `None`) branch, avoiding lifetime & move restrictions.
+    //
+    // However, there was pushback for that name, as an `OptionalCell`'s `get`
+    // method might indicate that it should directly return a `T` -- given that
+    // `OptionalCell<T>` presents itself as to be a wrapper around
+    // `T`. Furthermore, adding `.get()` might have developers use
+    // `.get().map(...)` instead, which defeats the purpose of having the
+    // `OptionalCell` convenience wrapper in the first place. For these reasons,
+    // `get` was renamed to `extract`.
+    //
+    // Unfortunately, `extract` turned out to be a confusing name, as it is not
+    // an idiomatic method name as found on Rust's standard library types, and
+    // further suggests that it actually removes a value from the `OptionalCell`
+    // (as the `take` method does). Thus, it has been renamed back to `get`.
+    //
+    // [1]: https://github.com/tock/tock/pull/2531
+    // [2]: https://github.com/tock/tock/pull/2533
+    // [3]: https://github.com/tock/tock/pull/3536
+    pub fn get(&self) -> Option<T> {
         self.value.get()
     }
 
@@ -179,20 +213,18 @@ impl<T: Copy> OptionalCell<T> {
     /// Call a closure on the value if the value exists.
     pub fn map<F, R>(&self, closure: F) -> Option<R>
     where
-        F: FnOnce(&mut T) -> R,
+        F: FnOnce(T) -> R,
     {
-        self.value.get().map(|mut val| closure(&mut val))
+        self.value.get().map(|val| closure(val))
     }
 
     /// Call a closure on the value if the value exists, or return the
     /// default if the value is `None`.
     pub fn map_or<F, R>(&self, default: R, closure: F) -> R
     where
-        F: FnOnce(&mut T) -> R,
+        F: FnOnce(T) -> R,
     {
-        self.value
-            .get()
-            .map_or(default, |mut val| closure(&mut val))
+        self.value.get().map_or(default, |val| closure(val))
     }
 
     /// If the cell contains a value, call a closure supplied with the
@@ -201,16 +233,23 @@ impl<T: Copy> OptionalCell<T> {
     pub fn map_or_else<U, D, F>(&self, default: D, closure: F) -> U
     where
         D: FnOnce() -> U,
-        F: FnOnce(&mut T) -> U,
+        F: FnOnce(T) -> U,
     {
-        self.value
-            .get()
-            .map_or_else(default, |mut val| closure(&mut val))
+        self.value.get().map_or_else(default, |val| closure(val))
     }
 
     /// If the cell is empty, return `None`. Otherwise, call a closure
     /// with the value of the cell and return the result.
     pub fn and_then<U, F: FnOnce(T) -> Option<U>>(&self, f: F) -> Option<U> {
         self.value.get().and_then(f)
+    }
+}
+
+// Manual implementation of the [`Default`] trait, as
+// `#[derive(Default)]` incorrectly constraints `T: Default`.
+impl<T> Default for OptionalCell<T> {
+    /// Returns an empty [`OptionalCell`].
+    fn default() -> Self {
+        OptionalCell::empty()
     }
 }

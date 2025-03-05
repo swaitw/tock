@@ -1,6 +1,12 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Timer driver.
 
-use crate::chip_config::CONFIG;
+use crate::chip_config::EarlGreyConfig;
+use crate::registers::top_earlgrey::RV_TIMER_BASE_ADDR;
+use core::marker::PhantomData;
 use kernel::hil::time::{self, Ticks64};
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
@@ -8,8 +14,6 @@ use kernel::utilities::registers::{register_bitfields, register_structs, ReadWri
 use kernel::utilities::StaticRef;
 use kernel::ErrorCode;
 use rv32i::machine_timer::MachineTimer;
-
-const PRESCALE: u16 = ((CONFIG.cpu_freq / 10_000) - 1) as u16; // 10Khz
 
 /// 10KHz `Frequency`
 #[derive(Debug)]
@@ -24,20 +28,15 @@ register_structs! {
     pub TimerRegisters {
         (0x000 => alert_test: WriteOnly<u32>),
         (0x004 => ctrl: ReadWrite<u32, ctrl::Register>),
-
         (0x008 => _reserved),
-
-        (0x100 => config: ReadWrite<u32, config::Register>),
-
-        (0x104 => value_low: ReadWrite<u32>),
-        (0x108 => value_high: ReadWrite<u32>),
-
-        (0x10c => compare_low: ReadWrite<u32>),
-        (0x110 => compare_high: ReadWrite<u32>),
-
-        (0x114 => intr_enable: ReadWrite<u32, intr::Register>),
-        (0x118 => intr_state: ReadWrite<u32, intr::Register>),
-        (0x11c => intr_test: WriteOnly<u32, intr::Register>),
+        (0x100 => intr_enable: ReadWrite<u32, intr::Register>),
+        (0x104 => intr_state: ReadWrite<u32, intr::Register>),
+        (0x108 => intr_test: WriteOnly<u32, intr::Register>),
+        (0x10C => config: ReadWrite<u32, config::Register>),
+        (0x110 => value_low: ReadWrite<u32>),
+        (0x114 => value_high: ReadWrite<u32>),
+        (0x118 => compare_low: ReadWrite<u32>),
+        (0x11C => compare_high: ReadWrite<u32>),
         (0x120 => @END),
     }
 }
@@ -46,23 +45,24 @@ register_bitfields![u32,
     ctrl [
         enable OFFSET(0) NUMBITS(1) []
     ],
+    intr [
+        timer0 OFFSET(0) NUMBITS(1) []
+    ],
     config [
         prescale OFFSET(0) NUMBITS(12) [],
         step OFFSET(16) NUMBITS(8) []
     ],
-    intr [
-        timer0 OFFSET(0) NUMBITS(1) []
-    ]
 ];
 
-pub struct RvTimer<'a> {
+pub struct RvTimer<'a, CFG: EarlGreyConfig> {
     registers: StaticRef<TimerRegisters>,
     alarm_client: OptionalCell<&'a dyn time::AlarmClient>,
     overflow_client: OptionalCell<&'a dyn time::OverflowClient>,
     mtimer: MachineTimer<'a>,
+    _cfg: PhantomData<CFG>,
 }
 
-impl<'a> RvTimer<'a> {
+impl<CFG: EarlGreyConfig> RvTimer<'_, CFG> {
     pub fn new() -> Self {
         Self {
             registers: TIMER_BASE,
@@ -74,14 +74,17 @@ impl<'a> RvTimer<'a> {
                 &TIMER_BASE.value_low,
                 &TIMER_BASE.value_high,
             ),
+            _cfg: PhantomData,
         }
     }
 
     pub fn setup(&self) {
+        let prescale: u16 = ((CFG::CPU_FREQ / 10_000) - 1) as u16; // 10Khz
+
         let regs = self.registers;
         // Set proper prescaler and the like
         regs.config
-            .write(config::prescale.val(PRESCALE as u32) + config::step.val(1u32));
+            .write(config::prescale.val(prescale as u32) + config::step.val(1u32));
         regs.compare_high.set(0);
         regs.value_low.set(0xFFFF_0000);
         regs.intr_enable.write(intr::timer0::CLEAR);
@@ -98,7 +101,7 @@ impl<'a> RvTimer<'a> {
     }
 }
 
-impl time::Time for RvTimer<'_> {
+impl<CFG: EarlGreyConfig> time::Time for RvTimer<'_, CFG> {
     type Frequency = Freq10KHz;
     type Ticks = Ticks64;
 
@@ -107,7 +110,7 @@ impl time::Time for RvTimer<'_> {
     }
 }
 
-impl<'a> time::Counter<'a> for RvTimer<'a> {
+impl<'a, CFG: EarlGreyConfig> time::Counter<'a> for RvTimer<'a, CFG> {
     fn set_overflow_client(&self, client: &'a dyn time::OverflowClient) {
         self.overflow_client.set(client);
     }
@@ -131,7 +134,7 @@ impl<'a> time::Counter<'a> for RvTimer<'a> {
     }
 }
 
-impl<'a> time::Alarm<'a> for RvTimer<'a> {
+impl<'a, CFG: EarlGreyConfig> time::Alarm<'a> for RvTimer<'a, CFG> {
     fn set_alarm_client(&self, client: &'a dyn time::AlarmClient) {
         self.alarm_client.set(client);
     }
@@ -162,4 +165,4 @@ impl<'a> time::Alarm<'a> for RvTimer<'a> {
 }
 
 const TIMER_BASE: StaticRef<TimerRegisters> =
-    unsafe { StaticRef::new(0x4010_0000 as *const TimerRegisters) };
+    unsafe { StaticRef::new(RV_TIMER_BASE_ADDR as *const TimerRegisters) };

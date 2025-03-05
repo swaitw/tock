@@ -1,6 +1,13 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Create a timer using the Machine Timer registers.
 
-use kernel::hil::time::{self, Alarm, ConvertTicks, Freq32KHz, Frequency, Ticks, Ticks64, Time};
+use core::marker::PhantomData;
+use core::num::NonZeroU32;
+
+use kernel::hil::time::{self, Alarm, ConvertTicks, Frequency, Ticks, Ticks64, Time};
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::Writeable;
 use kernel::utilities::registers::{register_structs, ReadWrite};
@@ -21,13 +28,14 @@ register_structs! {
     }
 }
 
-pub struct Clint<'a> {
+pub struct Clint<'a, F: Frequency> {
     registers: StaticRef<ClintRegisters>,
     client: OptionalCell<&'a dyn time::AlarmClient>,
     mtimer: MachineTimer<'a>,
+    _freq: PhantomData<F>,
 }
 
-impl<'a> Clint<'a> {
+impl<'a, F: Frequency> Clint<'a, F> {
     pub fn new(base: &'a StaticRef<ClintRegisters>) -> Self {
         Self {
             registers: *base,
@@ -38,6 +46,7 @@ impl<'a> Clint<'a> {
                 &base.value_low,
                 &base.value_high,
             ),
+            _freq: PhantomData,
         }
     }
 
@@ -55,8 +64,8 @@ impl<'a> Clint<'a> {
     }
 }
 
-impl Time for Clint<'_> {
-    type Frequency = Freq32KHz;
+impl<F: Frequency> Time for Clint<'_, F> {
+    type Frequency = F;
     type Ticks = Ticks64;
 
     fn now(&self) -> Ticks64 {
@@ -64,7 +73,7 @@ impl Time for Clint<'_> {
     }
 }
 
-impl<'a> time::Alarm<'a> for Clint<'a> {
+impl<'a, F: Frequency> time::Alarm<'a> for Clint<'a, F> {
     fn set_alarm_client(&self, client: &'a dyn time::AlarmClient) {
         self.client.set(client);
     }
@@ -94,14 +103,14 @@ impl<'a> time::Alarm<'a> for Clint<'a> {
 /// used by a chip if that chip has multiple hardware timer peripherals such that a different
 /// hardware timer can be used to provide alarms to capsules and userspace. This
 /// implementation will not work alongside other uses of the machine timer.
-impl kernel::platform::scheduler_timer::SchedulerTimer for Clint<'_> {
-    fn start(&self, us: u32) {
+impl<F: Frequency> kernel::platform::scheduler_timer::SchedulerTimer for Clint<'_, F> {
+    fn start(&self, us: NonZeroU32) {
         let now = self.now();
-        let tics = self.ticks_from_us(us);
+        let tics = self.ticks_from_us(us.get());
         self.set_alarm(now, tics);
     }
 
-    fn get_remaining_us(&self) -> Option<u32> {
+    fn get_remaining_us(&self) -> Option<NonZeroU32> {
         // We need to convert from native tics to us, multiplication could overflow in 32-bit
         // arithmetic. So we convert to 64-bit.
         let diff = self.get_alarm().wrapping_sub(self.now()).into_u64();
@@ -114,11 +123,11 @@ impl kernel::platform::scheduler_timer::SchedulerTimer for Clint<'_> {
         // However, if the alarm frequency is slow enough relative to the cpu frequency, it is
         // possible this will be evaluated while now() == get_alarm(), so we special case that
         // result where the alarm has fired but the subtraction has not overflowed
-        if diff >= <Self as Time>::Frequency::frequency() as u64 || diff == 0 {
+        if diff >= <Self as Time>::Frequency::frequency() as u64 {
             None
         } else {
             let hertz = <Self as Time>::Frequency::frequency() as u64;
-            Some(((diff * 1_000_000) / hertz) as u32)
+            NonZeroU32::new(((diff * 1_000_000) / hertz) as u32)
         }
     }
 

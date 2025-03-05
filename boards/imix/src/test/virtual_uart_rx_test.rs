@@ -1,10 +1,14 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Test reception on the virtualized UART by creating two readers that
 //! read in parallel. To add this test, include the line
 //! ```
 //!    virtual_uart_rx_test::run_virtual_uart_receive(uart_mux);
 //! ```
 //! to the imix boot sequence, where `uart_mux` is a
-//! `capsules::virtual_uart::MuxUart`.  There is a 3-byte and a 7-byte
+//! `capsules_core::virtualizers::virtual_uart::MuxUart`.  There is a 3-byte and a 7-byte
 //! read running in parallel. Test that they are both working by typing
 //! and seeing that they both get all characters. If you repeatedly
 //! type 'a', for example (0x61), you should see something like:
@@ -44,8 +48,10 @@
 //! 61
 //! ```
 
-use capsules::test::virtual_uart::TestVirtualUartReceive;
-use capsules::virtual_uart::{MuxUart, UartDevice};
+use core::ptr::addr_of_mut;
+
+use capsules_core::test::virtual_uart::TestVirtualUartReceive;
+use capsules_core::virtualizers::virtual_uart::{MuxUart, UartDevice};
 use kernel::debug;
 use kernel::hil::uart::Receive;
 use kernel::static_init;
@@ -66,7 +72,7 @@ unsafe fn static_init_test_receive_small(
     device.setup();
     let test = static_init!(
         TestVirtualUartReceive,
-        TestVirtualUartReceive::new(device, &mut SMALL)
+        TestVirtualUartReceive::new(device, &mut *addr_of_mut!(SMALL))
     );
     device.set_receive_client(test);
     test
@@ -80,7 +86,7 @@ unsafe fn static_init_test_receive_large(
     device.setup();
     let test = static_init!(
         TestVirtualUartReceive,
-        TestVirtualUartReceive::new(device, &mut BUFFER)
+        TestVirtualUartReceive::new(device, &mut *addr_of_mut!(BUFFER))
     );
     device.set_receive_client(test);
     test

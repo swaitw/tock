@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Reference Manual for the Imxrt-1052 development board
 //!
 //! - <https://www.nxp.com/webapp/Download?colCode=IMXRT1050RM>
@@ -6,12 +10,13 @@
 #![no_main]
 #![deny(missing_docs)]
 
-use capsules::virtual_alarm::VirtualMuxAlarm;
+use core::ptr::{addr_of, addr_of_mut};
+
+use capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm;
 use components::gpio::GpioComponent;
 use kernel::capabilities;
 use kernel::component::Component;
 use kernel::debug;
-use kernel::dynamic_deferred_call::{DynamicDeferredCall, DynamicDeferredCallClientState};
 use kernel::hil::gpio::Configure;
 use kernel::hil::led::LedLow;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
@@ -42,7 +47,6 @@ pub mod boot_header;
 
 // Number of concurrent processes this platform supports.
 const NUM_PROCS: usize = 4;
-const NUM_UPCALLS_IPC: usize = NUM_PROCS + 1;
 
 // Actual memory for holding the active process structures.
 static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
@@ -50,9 +54,12 @@ static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS]
 
 type Chip = imxrt1050::chip::Imxrt10xx<imxrt1050::chip::Imxrt10xxDefaultPeripherals>;
 static mut CHIP: Option<&'static Chip> = None;
+static mut PROCESS_PRINTER: Option<&'static capsules_system::process_printer::ProcessPrinterText> =
+    None;
 
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 // Manually setting the boot header section that contains the FCB header
 #[used]
@@ -69,20 +76,20 @@ pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
 /// A structure representing this platform that holds references to all
 /// capsules for this platform.
 struct Imxrt1050EVKB {
-    alarm: &'static capsules::alarm::AlarmDriver<
+    alarm: &'static capsules_core::alarm::AlarmDriver<
         'static,
         VirtualMuxAlarm<'static, imxrt1050::gpt::Gpt1<'static>>,
     >,
-    button: &'static capsules::button::Button<'static, imxrt1050::gpio::Pin<'static>>,
-    console: &'static capsules::console::Console<'static>,
-    gpio: &'static capsules::gpio::GPIO<'static, imxrt1050::gpio::Pin<'static>>,
-    ipc: kernel::ipc::IPC<NUM_PROCS, NUM_UPCALLS_IPC>,
-    led: &'static capsules::led::LedDriver<
+    button: &'static capsules_core::button::Button<'static, imxrt1050::gpio::Pin<'static>>,
+    console: &'static capsules_core::console::Console<'static>,
+    gpio: &'static capsules_core::gpio::GPIO<'static, imxrt1050::gpio::Pin<'static>>,
+    ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
+    led: &'static capsules_core::led::LedDriver<
         'static,
         LedLow<'static, imxrt1050::gpio::Pin<'static>>,
         1,
     >,
-    ninedof: &'static capsules::ninedof::NineDof<'static>,
+    ninedof: &'static capsules_extra::ninedof::NineDof<'static>,
 
     scheduler: &'static RoundRobinSched<'static>,
     systick: cortexm7::systick::SysTick,
@@ -95,13 +102,13 @@ impl SyscallDriverLookup for Imxrt1050EVKB {
         F: FnOnce(Option<&dyn kernel::syscall::SyscallDriver>) -> R,
     {
         match driver_num {
-            capsules::alarm::DRIVER_NUM => f(Some(self.alarm)),
-            capsules::button::DRIVER_NUM => f(Some(self.button)),
-            capsules::console::DRIVER_NUM => f(Some(self.console)),
-            capsules::gpio::DRIVER_NUM => f(Some(self.gpio)),
+            capsules_core::alarm::DRIVER_NUM => f(Some(self.alarm)),
+            capsules_core::button::DRIVER_NUM => f(Some(self.button)),
+            capsules_core::console::DRIVER_NUM => f(Some(self.console)),
+            capsules_core::gpio::DRIVER_NUM => f(Some(self.gpio)),
             kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
-            capsules::led::DRIVER_NUM => f(Some(self.led)),
-            capsules::ninedof::DRIVER_NUM => f(Some(self.ninedof)),
+            capsules_core::led::DRIVER_NUM => f(Some(self.led)),
+            capsules_extra::ninedof::DRIVER_NUM => f(Some(self.ninedof)),
             _ => f(None),
         }
     }
@@ -119,7 +126,7 @@ impl KernelResources<imxrt1050::chip::Imxrt10xx<imxrt1050::chip::Imxrt10xxDefaul
     type ContextSwitchCallback = ();
 
     fn syscall_driver_lookup(&self) -> &Self::SyscallDriverLookup {
-        &self
+        self
     }
     fn syscall_filter(&self) -> &Self::SyscallFilter {
         &()
@@ -219,24 +226,18 @@ unsafe fn setup_peripherals(peripherals: &imxrt1050::chip::Imxrt10xxDefaultPerip
 /// removed when this function returns. Otherwise, the stack space used for
 /// these static_inits is wasted.
 #[inline(never)]
-unsafe fn get_peripherals() -> &'static mut imxrt1050::chip::Imxrt10xxDefaultPeripherals {
+unsafe fn start() -> (
+    &'static kernel::Kernel,
+    Imxrt1050EVKB,
+    &'static imxrt1050::chip::Imxrt10xx<imxrt1050::chip::Imxrt10xxDefaultPeripherals>,
+) {
+    imxrt1050::init();
+
     let ccm = static_init!(imxrt1050::ccm::Ccm, imxrt1050::ccm::Ccm::new());
     let peripherals = static_init!(
         imxrt1050::chip::Imxrt10xxDefaultPeripherals,
         imxrt1050::chip::Imxrt10xxDefaultPeripherals::new(ccm)
     );
-
-    peripherals
-}
-
-/// Main function.
-///
-/// This is called after RAM initialization is complete.
-#[no_mangle]
-pub unsafe fn main() {
-    imxrt1050::init();
-
-    let peripherals = get_peripherals();
     peripherals.ccm.set_low_power_mode();
     peripherals.lpuart1.disable_clock();
     peripherals.lpuart2.disable_clock();
@@ -250,15 +251,7 @@ pub unsafe fn main() {
 
     setup_peripherals(peripherals);
 
-    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&PROCESSES));
-
-    let dynamic_deferred_call_clients =
-        static_init!([DynamicDeferredCallClientState; 2], Default::default());
-    let dynamic_deferred_caller = static_init!(
-        DynamicDeferredCall,
-        DynamicDeferredCall::new(dynamic_deferred_call_clients)
-    );
-    DynamicDeferredCall::set_global_instance(dynamic_deferred_caller);
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&*addr_of!(PROCESSES)));
 
     let chip = static_init!(Chip, Chip::new(peripherals));
     CHIP = Some(chip);
@@ -309,35 +302,31 @@ pub unsafe fn main() {
     // Enable clock
     peripherals.lpuart1.enable_clock();
 
-    let lpuart_mux = components::console::UartMuxComponent::new(
-        &peripherals.lpuart1,
-        115200,
-        dynamic_deferred_caller,
-    )
-    .finalize(());
-    io::WRITER.set_initialized();
+    let lpuart_mux = components::console::UartMuxComponent::new(&peripherals.lpuart1, 115200)
+        .finalize(components::uart_mux_component_static!());
+    (*addr_of_mut!(io::WRITER)).set_initialized();
 
     // Create capabilities that the board needs to call certain protected kernel
     // functions.
     let memory_allocation_capability = create_capability!(capabilities::MemoryAllocationCapability);
-    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
     let process_management_capability =
         create_capability!(capabilities::ProcessManagementCapability);
 
     // Setup the console.
     let console = components::console::ConsoleComponent::new(
         board_kernel,
-        capsules::console::DRIVER_NUM,
+        capsules_core::console::DRIVER_NUM,
         lpuart_mux,
     )
-    .finalize(());
+    .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(lpuart_mux).finalize(());
+    components::debug_writer::DebugWriterComponent::new(lpuart_mux)
+        .finalize(components::debug_writer_component_static!());
 
     // LEDs
 
     // Clock to Port A is enabled in `set_pin_primary_functions()
-    let led = components::led::LedsComponent::new().finalize(components::led_component_helper!(
+    let led = components::led::LedsComponent::new().finalize(components::led_component_static!(
         LedLow<'static, imxrt1050::gpio::Pin<'static>>,
         LedLow::new(peripherals.ports.pin(imxrt1050::gpio::PinId::AdB0_09)),
     ));
@@ -345,7 +334,7 @@ pub unsafe fn main() {
     // BUTTONs
     let button = components::button::ButtonComponent::new(
         board_kernel,
-        capsules::button::DRIVER_NUM,
+        capsules_core::button::DRIVER_NUM,
         components::button_component_helper!(
             imxrt1050::gpio::Pin,
             (
@@ -355,33 +344,33 @@ pub unsafe fn main() {
             )
         ),
     )
-    .finalize(components::button_component_buf!(imxrt1050::gpio::Pin));
+    .finalize(components::button_component_static!(imxrt1050::gpio::Pin));
 
     // ALARM
     let gpt1 = &peripherals.gpt1;
     let mux_alarm = components::alarm::AlarmMuxComponent::new(gpt1).finalize(
-        components::alarm_mux_component_helper!(imxrt1050::gpt::Gpt1),
+        components::alarm_mux_component_static!(imxrt1050::gpt::Gpt1),
     );
 
     let alarm = components::alarm::AlarmDriverComponent::new(
         board_kernel,
-        capsules::alarm::DRIVER_NUM,
+        capsules_core::alarm::DRIVER_NUM,
         mux_alarm,
     )
-    .finalize(components::alarm_component_helper!(imxrt1050::gpt::Gpt1));
+    .finalize(components::alarm_component_static!(imxrt1050::gpt::Gpt1));
 
     // GPIO
     // For now we expose only two pins
     let gpio = GpioComponent::new(
         board_kernel,
-        capsules::gpio::DRIVER_NUM,
+        capsules_core::gpio::DRIVER_NUM,
         components::gpio_component_helper!(
             imxrt1050::gpio::Pin<'static>,
             // The User Led
             0 => peripherals.ports.pin(imxrt1050::gpio::PinId::AdB0_09)
         ),
     )
-    .finalize(components::gpio_component_buf!(
+    .finalize(components::gpio_component_static!(
         imxrt1050::gpio::Pin<'static>
     ));
 
@@ -439,37 +428,42 @@ pub unsafe fn main() {
         .set_speed(imxrt1050::lpi2c::Lpi2cSpeed::Speed100k, 8);
 
     use imxrt1050::gpio::PinId;
-    let mux_i2c =
-        components::i2c::I2CMuxComponent::new(&peripherals.lpi2c1, None, dynamic_deferred_caller)
-            .finalize(components::i2c_mux_component_helper!());
+    let mux_i2c = components::i2c::I2CMuxComponent::new(&peripherals.lpi2c1, None).finalize(
+        components::i2c_mux_component_static!(imxrt1050::lpi2c::Lpi2c),
+    );
 
     // Fxos8700 sensor
     let fxos8700 = components::fxos8700::Fxos8700Component::new(
         mux_i2c,
+        0x1f,
         peripherals.ports.pin(PinId::AdB1_00),
     )
-    .finalize(());
+    .finalize(components::fxos8700_component_static!(
+        imxrt1050::lpi2c::Lpi2c
+    ));
 
     // Ninedof
-    let ninedof =
-        components::ninedof::NineDofComponent::new(board_kernel, capsules::ninedof::DRIVER_NUM)
-            .finalize(components::ninedof_component_helper!(fxos8700));
+    let ninedof = components::ninedof::NineDofComponent::new(
+        board_kernel,
+        capsules_extra::ninedof::DRIVER_NUM,
+    )
+    .finalize(components::ninedof_component_static!(fxos8700));
 
-    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&PROCESSES)
-        .finalize(components::rr_component_helper!(NUM_PROCS));
+    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&*addr_of!(PROCESSES))
+        .finalize(components::round_robin_component_static!(NUM_PROCS));
 
     let imxrt1050 = Imxrt1050EVKB {
-        console: console,
+        console,
         ipc: kernel::ipc::IPC::new(
             board_kernel,
             kernel::ipc::DRIVER_NUM,
             &memory_allocation_capability,
         ),
-        led: led,
-        button: button,
-        ninedof: ninedof,
-        alarm: alarm,
-        gpio: gpio,
+        led,
+        button,
+        ninedof,
+        alarm,
+        gpio,
 
         scheduler,
         systick: cortexm7::systick::SysTick::new_with_calibration(792_000_000),
@@ -483,12 +477,18 @@ pub unsafe fn main() {
     //--------------------------------------------------------------------------
     // Process Console
     //---------------------------------------------------------------------------
+    let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
+        .finalize(components::process_printer_text_component_static!());
+    PROCESS_PRINTER = Some(process_printer);
+
     let process_console = components::process_console::ProcessConsoleComponent::new(
         board_kernel,
         lpuart_mux,
         mux_alarm,
+        process_printer,
+        None,
     )
-    .finalize(components::process_console_component_helper!(
+    .finalize(components::process_console_component_static!(
         imxrt1050::gpt::Gpt1
     ));
     let _ = process_console.start();
@@ -514,14 +514,14 @@ pub unsafe fn main() {
         board_kernel,
         chip,
         core::slice::from_raw_parts(
-            &_sapps as *const u8,
-            &_eapps as *const u8 as usize - &_sapps as *const u8 as usize,
+            core::ptr::addr_of!(_sapps),
+            core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
         ),
         core::slice::from_raw_parts_mut(
-            &mut _sappmem as *mut u8,
-            &_eappmem as *const u8 as usize - &_sappmem as *const u8 as usize,
+            core::ptr::addr_of_mut!(_sappmem),
+            core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
         ),
-        &mut PROCESSES,
+        &mut *addr_of_mut!(PROCESSES),
         &FAULT_RESPONSE,
         &process_management_capability,
     )
@@ -530,10 +530,14 @@ pub unsafe fn main() {
         debug!("{:?}", err);
     });
 
-    board_kernel.kernel_loop(
-        &imxrt1050,
-        chip,
-        Some(&imxrt1050.ipc),
-        &main_loop_capability,
-    );
+    (board_kernel, imxrt1050, chip)
+}
+
+/// Main function called after RAM initialized.
+#[no_mangle]
+pub unsafe fn main() {
+    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
+
+    let (board_kernel, board, chip) = start();
+    board_kernel.kernel_loop(&board, chip, Some(&board.ipc), &main_loop_capability);
 }

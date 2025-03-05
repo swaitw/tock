@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 //! Interface for Tock kernel schedulers.
 
 pub mod cooperative;
@@ -5,11 +9,12 @@ pub mod mlfq;
 pub mod priority;
 pub mod round_robin;
 
-use crate::dynamic_deferred_call::DynamicDeferredCall;
-use crate::kernel::StoppedExecutingReason;
+use crate::deferred_call::DeferredCall;
 use crate::platform::chip::Chip;
 use crate::process::ProcessId;
-use crate::Kernel;
+use crate::process::StoppedExecutingReason;
+
+use core::num::NonZeroU32;
 
 /// Trait which any scheduler must implement.
 pub trait Scheduler<C: Chip> {
@@ -24,7 +29,7 @@ pub trait Scheduler<C: Chip> {
     /// process. If the timeslice is `None`, the process will be run
     /// cooperatively (i.e. without preemption). Otherwise the process will run
     /// with a timeslice set to the specified length.
-    fn next(&self, kernel: &Kernel) -> SchedulingDecision;
+    fn next(&self) -> SchedulingDecision;
 
     /// Inform the scheduler of why the last process stopped executing, and how
     /// long it executed for. Notably, `execution_time_us` will be `None`
@@ -47,7 +52,9 @@ pub trait Scheduler<C: Chip> {
     /// as this function is called in the core kernel loop.
     unsafe fn execute_kernel_work(&self, chip: &C) {
         chip.service_pending_interrupts();
-        DynamicDeferredCall::call_global_instance_while(|| !chip.has_pending_interrupts());
+        while DeferredCall::has_tasks() && !chip.has_pending_interrupts() {
+            DeferredCall::service_next_pending();
+        }
     }
 
     /// Ask the scheduler whether to take a break from executing userspace
@@ -55,8 +62,7 @@ pub trait Scheduler<C: Chip> {
     /// implementation, which always prioritizes kernel work, but schedulers
     /// that wish to defer interrupt handling may reimplement it.
     unsafe fn do_kernel_work_now(&self, chip: &C) -> bool {
-        chip.has_pending_interrupts()
-            || DynamicDeferredCall::global_instance_calls_pending().unwrap_or(false)
+        chip.has_pending_interrupts() || DeferredCall::has_tasks()
     }
 
     /// Ask the scheduler whether to continue trying to execute a process.
@@ -76,8 +82,7 @@ pub trait Scheduler<C: Chip> {
     ///
     /// `id` is the identifier of the currently active process.
     unsafe fn continue_process(&self, _id: ProcessId, chip: &C) -> bool {
-        !(chip.has_pending_interrupts()
-            || DynamicDeferredCall::global_instance_calls_pending().unwrap_or(false))
+        !(chip.has_pending_interrupts() || DeferredCall::has_tasks())
     }
 }
 
@@ -88,7 +93,7 @@ pub enum SchedulingDecision {
     /// Tell the kernel to run the specified process with the passed timeslice.
     /// If `None` is passed as a timeslice, the process will be run
     /// cooperatively.
-    RunProcess((ProcessId, Option<u32>)),
+    RunProcess((ProcessId, Option<NonZeroU32>)),
 
     /// Tell the kernel to go to sleep. Notably, if the scheduler asks the
     /// kernel to sleep when kernel tasks are ready, the kernel will not sleep,

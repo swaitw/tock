@@ -2,97 +2,55 @@
 
 [![tock-ci](https://github.com/tock/tock/workflows/tock-ci/badge.svg)][tock-ci]
 [![slack](https://img.shields.io/badge/slack-tockos-informational)][slack]
+[![book](https://img.shields.io/badge/book-Tock_Book-green)][tock-book]
 
-Tock is an embedded operating system designed for running multiple concurrent, mutually
-distrustful applications on Cortex-M and RISC-V based embedded platforms.
-Tock's design
-centers around protection, both from potentially malicious applications and
-from device drivers. Tock uses two mechanisms to protect different components
-of the operating system. First, the kernel and device drivers are written in
-Rust, a systems programming language that provides compile-time memory safety,
-type safety and strict aliasing. Tock uses Rust to protect the kernel (e.g. the
-scheduler and hardware abstraction layer) from platform specific device drivers
-as well as isolate device drivers from each other. Second, Tock uses memory
-protection units to isolate applications from each other and the kernel.
+Tock is an embedded operating system designed for running multiple concurrent,
+mutually distrustful applications on Cortex-M and RISC-V based embedded
+platforms. Tock's design centers around protection, both from potentially
+malicious applications and from device drivers. Tock uses two mechanisms to
+protect different components of the operating system. First, the kernel and
+device drivers are written in Rust, a systems programming language that provides
+compile-time memory safety and type safety. Tock uses Rust to protect the kernel
+(e.g. the scheduler and hardware abstraction layer) from platform specific
+device drivers as well as isolate device drivers from each other. Second, Tock
+uses memory protection units to isolate applications from each other and the
+kernel.
 
 [tock-ci]: https://github.com/tock/tock/actions?query=branch%3Amaster+workflow%3Atock-ci
 
-Tock 2.0!
+Tock 2.x!
 ---------
 
-Tock is now on its second major release! Here are some 2.0 highlights, and see
-the [release notes](https://github.com/tock/tock/releases/tag/release-2.0) for
-more detail, or the [changelog](CHANGELOG.md#new-in-20) for the complete set of
-changes.
-
-- Revamped system call interface.
-- Support for 11 new hardware platforms.
-- Updated kernel types.
-- Many new and improved HILs.
-
-As 2.0 includes many breaking changes, to use the new kernel you will need to
-ensure you have updated versions of userspace apps and the various Tock tools.
-We recommend if you are using git that you do a `git pull`, and if you are using
-tagged releases be sure to update to the 2.0 release.
-
-Initially, only [libtock-c](https://github.com/tock/libtock-c) is compatible with
-Tock 2.0. Work on supporting Tock 2.0 for libtock-rs is [under
-development](https://github.com/tock/libtock-rs/issues/322).
+Tock is now on its second major release! For a summary of the latest new
+features and improvements, check out the [changelog](CHANGELOG.md).
 
 
-Learn More
-----------
+Getting Started
+---------------
 
-How would you like to get started?
+There are a variety of resources for learning about Tock, contributing to the
+project, and getting help.
 
-### Learn How Tock Works
-
-Tock is documented in the [doc](doc) folder. Read through the guides there to
-learn about the overview and design of Tock, its implementation, and much
-more.
-
-
-### Use Tock
-
-Follow our [getting started guide](doc/Getting_Started.md) to set up your
-system to compile Tock.
-
-Head to the [hardware page](https://www.tockos.org/hardware/)
-to learn about the hardware platforms Tock supports. Also check out the
-[Tock Book](https://book.tockos.org) for a step-by-step introduction to getting
-Tock up and running.
-
-Find example applications that run on top of the Tock kernel written in both
-[Rust](https://github.com/tock/libtock-rs) and
-[C](https://github.com/tock/libtock-c).
-
-
-### Develop Tock
-
-Read our [getting started guide](doc/Getting_Started.md) to get the correct
-version of the Rust compiler, then look through the `/kernel`, `/capsules`,
-`/chips`, and `/boards` directories. There are also generated [source code
-docs](https://docs.tockos.org).
-
-We encourage contributions back to Tock and are happy to accept pull requests
-for anything from small documentation fixes to whole new platforms.
-For details, check out our [Contributing Guide](.github/CONTRIBUTING.md).
-To get started, please do not hesitate to submit a PR. We'll happily guide you
-through any needed changes.
-
-
-### Keep Up To Date
-
-Check out the [blog](https://www.tockos.org/blog/) where the **Talking Tock**
-post series highlights what's new in Tock. Also, follow
-[@talkingtock](https://twitter.com/talkingtock) on Twitter.
-
-You can also browse our
-[email group](https://groups.google.com/forum/#!forum/tock-dev)
-and our [Slack][slack] to see
-discussions on Tock development.
+- About Tock
+  - [The Tock Book][tock-book]: online tutorials and documentation
+  - [Getting Started with Secure Embedded Systems][book-systems]: Tock textbook
+- Developing Tock
+  - [Tock API Docs][tockapidoc]
+  - [Contributing Guide](.github/CONTRIBUTING.md)
+  - [Code Review Guidelines](doc/CodeReview.md)
+- Getting Help
+  - [Slack Channel][slack]
+  - [Email List](https://lists.tockos.org)
+  - [Tock Blog](https://www.tockos.org/blog/)
+  - [@talkingtock](https://twitter.com/talkingtock)
 
 [slack]: https://join.slack.com/t/tockos/shared_invite/enQtNDE5ODQyNDU4NTE1LWVjNTgzMTMwYzA1NDI1MjExZjljMjFmOTMxMGIwOGJlMjk0ZTI4YzY0NTYzNWM0ZmJmZGFjYmY5MTJiMDBlOTk
+
+[tock-book]: https://book.tockos.org
+
+[book-systems]: https://link.springer.com/book/10.1007/978-1-4842-7789-8
+
+[tockapidoc]: https://docs.tockos.org
 
 
 Code of Conduct
@@ -102,9 +60,9 @@ The Tock project adheres to the Rust [Code of Conduct][coc].
 
 All contributors, community members, and visitors are expected to familiarize
 themselves with the Code of Conduct and to follow these standards in all
-Tock-affiliated environments, which includes but is not limited to
-repositories, chats, and meetup events. For moderation issues, please contact
-members of the @tock/core-wg.
+Tock-affiliated environments, which includes but is not limited to repositories,
+chats, and meetup events. For moderation issues, please contact members of the
+@tock/core-wg.
 
 [coc]: https://www.rust-lang.org/conduct.html
 
@@ -148,7 +106,7 @@ Amit Levy, Bradford Campbell, Branden Ghena, Daniel B. Giffin, Pat Pannuto, Prab
 <details>
   <summary>Other Tock-related papers</summary>
 
-  <p>There are also two shorter papers that look at potential limitations of the Rust language for embedded software development. The earlier PLOS paper lays out challenges and the later APSys paper lays out potential solutions. Some persons describing work on programming languages and type theory may benefit from these references, but generally, most work should cite the SOSP paper above.</p>
+  <p>There are two shorter papers that look at potential limitations of the Rust language for embedded software development. The earlier PLOS paper lays out challenges and the later APSys paper lays out potential solutions. Some persons describing work on programming languages and type theory may benefit from these references, but generally, most work should cite the SOSP paper above.</p>
   <h4><a href="http://doi.acm.org/10.1145/3124680.3124717">APSys: The Case for Writing a Kernel in Rust</a></h4>
 <pre>
 @inproceedings{levy17rustkernel,
@@ -187,6 +145,25 @@ Amit Levy, Bradford Campbell, Branden Ghena, Daniel B. Giffin, Pat Pannuto, Prab
 	address = {New York, NY, USA},
 	conference-url = {http://plosworkshop.org/2015/},
 	author = {Levy, Amit and Andersen, Michael P and Campbell, Bradford and Culler, David and Dutta, Prabal and Ghena, Branden and Levis, Philip and Pannuto, Pat},
+}</pre>
+  <p>There is also a paper on the Tock security model. The threat model documentation in the docs/ folder is the source of truth for the current Tock threat model, but this paper represents a snapshot of the reasoning behind the Tock threat model and details how it compares to those in similar embedded OSes.</p>
+  <h4><a href="https://dx.doi.org/10.1145/3517208.3523752">EuroSec: Tiered Trust for useful embedded systems security</a></h4>
+<pre>
+@inproceedings{10.1145/3517208.3523752,
+	author = {Ayers, Hudson and Dutta, Prabal and Levis, Philip and Levy, Amit and Pannuto, Pat and Van Why, Johnathan and Watson, Jean-Luc},
+	title = {Tiered Trust for Useful Embedded Systems Security},
+	year = {2022},
+	isbn = {9781450392556},
+	publisher = {Association for Computing Machinery},
+	address = {New York, NY, USA},
+	url = {https://doi.org/10.1145/3517208.3523752},
+	doi = {10.1145/3517208.3523752},
+	booktitle = {Proceedings of the 15th European Workshop on Systems Security},
+	pages = {15–21},
+	numpages = {7},
+	keywords = {security, embedded systems, operating systems, IoT},
+	location = {Rennes, France},
+	series = {EuroSec '22}
 }</pre>
 </details>
 

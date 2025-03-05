@@ -1,3 +1,272 @@
+New in 2.2
+==========
+
+Tock 2.2 represents two years of Tock development since v2.1.1. This release
+contains almost 3900 commits made across 840 PRs by 90 contributors (of which 48
+are new contributors!). It is the first Tock release that can compile on a
+stable Rust toolchain, and contains many other important fixes, new subsystems,
+new platforms, new drivers, and major refactors.
+
+* Backwards Compatibility
+
+  Tock 2.2 extends its system call interface through one new system call
+  ([`Yield-WaitFor`](https://github.com/tock/tock/pull/3577)), but retains
+  backwards compatbility with Tock 2.1.1 for its core system call interface and
+  all [stabilized
+  drivers](https://github.com/tock/tock/tree/7c88a6209e3960c0eb2081c5071693dc1987964d/doc/syscalls).
+
+  In this release, we revised Tock's alarm system call driver implementation to
+  predictably wrap its `ticks` values at `(2**32 - 1)` ticks, across all
+  platforms. Before this change, hardware alarm implementations that were less
+  than 32 bit wide would wrap before reaching `(2**32 - 1)` ticks, which
+  complicated correct alarm handling in userspace. In Tock 2.2, these alarm
+  implementations are scaled to 32 bit, while also scaling their advertised
+  frequency appropriately. While this change is non-breaking and compatible with
+  the previous alarm implementation, it can expose such scaled alarms to
+  userspace at significantly higher advertised `frequency` values. Userspace
+  alarm implementations that did not correctly handle such high frequencies may
+  need to be fixed to support this new driver implementation.
+
+* Security and `arch`-crate Fixes
+
+  Tock 2.2 includes important and security-relevant fixes for its Cortex-M and
+  RISC-V architecture support.
+
+  * When switching between applications, the RISC-V PMP implementation did not
+    correctly invalidate any additional memory protection regions that are not
+    overwritten by the target app's PMP configuration. Under certain conditions
+    this can allow an application to access private memory regions belonging to
+    a different applications (such as when using IPC).
+
+  * The Cortex-M (Armv7-M) and Cortex-M0/M0+ (Armv6-M) hard fault, interrupt and
+    `svc` handlers contained a bug that could allow an application to execute in
+    `privileged` mode after returning from the handler. This allows an
+    application to execute code at kernel privileges and read / write arbitrary
+    memory.
+
+* Stable Rust Support
+
+  This release removes all nightly Rust features from all of Tock's core kernel
+  crates (such as `kernel`, `arch/*`, and `chips/*`). This allows Tock to be
+  built on the Rust stable toolchain for the first time!
+
+  We demonstrate this by switching the `hail` board to a stable toolchain in
+  this release. We continue to compile other boards on the Rust nightly
+  toolchain, as this enables some important code-size optimizations (such as by
+  compiling our own, size-optimized core library).
+
+* `AppID`, Credentials and Storage Permissions
+
+  This Tock release revisits how applications are identified in the kernel, and
+  introduces a set of mechanisms that allow developers to identify, verify, and
+  restrict applications that are running on a Tock kernel. AppIDs are the core
+  mechanism to enable this and identify an application contained in a userspace
+  binary. AppIDs allow the kernel to apply security policies to applications as
+  their code evolves and their binaries change. We specify AppIDs, Credentials
+  and their interactions with process loading in [a draft
+  TRD](https://github.com/tock/tock/blob/7c88a6209e3960c0eb2081c5071693dc1987964d/doc/reference/trd-appid.md).
+
+  Additionally, we introduce a mechanism to assign applications permissions to
+  access some persistent storage (e.g., keys in a key value store). This
+  mechanism interacts with AppIDs (ShortIDs) and is also specified in a [a draft
+  TRD](https://github.com/tock/tock/blob/7c88a6209e3960c0eb2081c5071693dc1987964d/doc/reference/trd-storage-permissions.md).
+
+* Major Refactors and Interface Changes
+
+  We implement a number of kernel-internal refactors and interface changes:
+
+  - System call drivers are now mandated to either return `Success` or
+    `Failure(ErrorCode::NODEVICE)` for a `command` system call with command
+    number `0`. Previously, some drivers used this command number to also convey
+    additional information to userspace. This release does not change the
+    interface of any [stabilized
+    drivers](https://github.com/tock/tock/tree/7c88a6209e3960c0eb2081c5071693dc1987964d/doc/syscalls),
+    which will be updated as part of Tock 3.0.
+
+  - Tock 2.2 introduces [a new policy to support external
+    dependencies][external-deps] in the upstream Tock codebase. As part of this
+    effort, we split up the existing, single `capsules` crate into multipe
+    crates (such as `capsules-core`, `capsules-extra`, and `capsules-system`)
+    with different guarantees concerning stability and use of external
+    dependencies. The `core` capsules crate contains capsules deemed essential
+    to most Tock systems, as well as virtualizers which enable a given single
+    peripheral to be used by multiple clients. Other capsules have been moved to
+    the `extra` capsules crate. The `system` capsules crate contains components
+    that extend the functionality of the Tock core kernel, while not requiring
+    `unsafe`.
+
+  - Furthermore, the `DeferredCall` and `DynamicDeferredCall` subsystems have
+    been replaced with a more lightweight and unified deferred call
+    infrastructure. This new approach has a smaller code size overhead and
+    requires less setup boilerplate code than `DynamicDeferredCall`.
+
+  - `LeasableBuffer` has been renamed to `SubSlice` and features a significantly
+    improved API. Multiple subsystems have been ported to this new type.
+
+  - Tock 2.2 introduces "configuration boards": variants of in-tree board
+    definition showcasing certain subsystems or peripherals. These boards (under
+    `boards/configurations`) are implemented by converting some Tock boards into
+    combined "lib + bin" crates and extending these boards.
+
+  - Tock can now be built entirely using `cargo` and without its Makefiles. This
+    change also simplifies downstream board definitions:
+
+  - A new `StreamingProcessSlice` helper provides a reusable data structure to
+    convey a "stream" of data from capsures to userspace. This is used in Tock's
+    new CAN driver, and is useful for ADC, networking, etc.
+
+  - Tock introduces a new interface for custom implementations of the
+    userspace-syscall boundary to hook into the RISC-V trap handler, by
+    specifying which registers are clobbered and providing a generic trampoline
+    to jump to custom code on a trap.
+
+* New Boards
+
+  This release features support for 7 new boards in the upstream Tock codebase:
+  * sma_q3 by @dcz-self in https://github.com/tock/tock/pull/3182
+  * particle_boron by @twilfredo in https://github.com/tock/tock/pull/3196
+  * BBC HiFive Inventor by @mateibarbu19 in
+    https://github.com/tock/tock/pull/3225
+  * SparkFun LoRa Thing Plus by @alistair23 in
+    https://github.com/tock/tock/pull/3273
+  * makepython-nrf52840 by @bradjc in https://github.com/tock/tock/pull/3817
+  * Nano33BLE Sense Rev2 by @TheButterMineCutter in
+    https://github.com/tock/tock/pull/3717
+  * VeeR EL2 simulation target by @wsipak in
+    https://github.com/tock/tock/pull/4118
+
+* New HILs, Drivers and Features
+
+  Tock 2.2 features 6 new HILs:
+  * CAN bus by @teonaseverin in https://github.com/tock/tock/pull/3301
+  * `Buzzer` by @TeodoraMiu in https://github.com/tock/tock/pull/3084
+  * `DateTime` by @Remus7 in https://github.com/tock/tock/pull/3559
+  * `CycleCounter` by @codingHahn and @hudson-ayers in
+    https://github.com/tock/tock/pull/3934
+  * `public_key_crypto/SignatureVerify` by @bradjc in
+    https://github.com/tock/tock/pull/3878
+  * `Servo` by @inesmaria08 in https://github.com/tock/tock/pull/4126
+
+  An additional 40 PRs added support for various hardware peripherals, subsystems and other features.
+
+* IEEE 802.15.4 and 6LoWPAN Stack
+
+  We can now join a Thread network by running OpenThread as a libtock-c
+  userspace implementation, thanks to a major refactor and redesign of Tock's
+  IEEE 802.15.4 and 6LoWPAN stack.
+
+  **Known issue**: UDP transmit functionality is currently broken with a bug /
+  inconsistency between the kernel and libtock-c implementation. When executing
+  the transmit syscall, the libtock-c application fails to provide the src
+  address and fails the error check that occurs for the transmit syscall. For
+  more information, see the Tock 2.2 release testing issue:
+  https://github.com/tock/tock/issues/4272#issuecomment-2569993915
+
+In addition to the above, this release includes a plethora of other fixes,
+improvements and refactors. You can see the full list of changes at
+https://github.com/tock/tock/compare/release-2.1...release-2.2
+
+New in 2.1
+==========
+
+Tock 2.1 has seen numerous changes from Tock 2.0. In particular, the new system
+call interface introduced with Tock 2.0 has been refined to provide more
+guarantees to processes with respect to sharing and unsharing buffers and
+upcalls. Other changes include the introduction of a _userspace-readable allow_
+system call, support for new HILs and boards, and various other bug-fixes and
+improvements to code size and documentation.
+
+ *  Breaking Changes
+
+    - The implemented encoding of the system call return variant "Success with
+      u32 and u64" has been changed to match the specification of
+      [TRD 104](https://github.com/tock/tock/blob/master/doc/reference/trd104-syscalls.md).
+      Accordingly, the name of the `SyscallReturnVariant` enum variant has been
+      changed from `SuccessU64U32` to `SuccessU32U64`
+      (https://github.com/tock/tock/pull/3175).
+
+    - `VirtualMuxAlarm`s now require the `setup()` function to be called in
+      board set up code after they are created
+      (https://github.com/tock/tock/pull/2866).
+
+ * Noteworthy Changes
+
+    - Subscribe and allow operations are no longer handled by capsules
+      themselves, but through the kernel's `Grant` logic itself
+      (https://github.com/tock/tock/pull/2906). This change has multiple
+      implications for users of Tock:
+
+      - The `Grant` type accepts the number of read-only and read-write allow
+        buffers, as well as the number of subscribe upcalls. It will reserve a
+        fixed amount of space per `Grant` to store the respective allow and
+        subscribe state. Thus, to make efficient use of `Grant` space, allow
+        buffer and subscribe upcall numbers should be assigned in a non-sparse
+        fashion.
+
+      - Legal allow and subscribe calls can no longer be refused by a capsule.
+        This implies that it is always possible for an application to cause the
+        kernel to relinquish a previously shared buffer through an `allow`
+        operation. Similarly, `subscribe` can now be used to infallibly ensure
+        that a given upcall will not be scheduled by the kernel any longer,
+        although already enqueued calls to a given upcall function can still be
+        delivered even after a `subscribe` operation. The precise semantics
+        around these system calls are described in
+        [TRD 104](https://github.com/tock/tock/blob/ffa5ce02bb6e2d9f187c7bebccf33905d9c993ec/doc/reference/trd104-syscalls.md).
+
+    - Introduction of a new userspace-readable allow system call, where apps
+      are explicitly allowed to read buffers shared with the kernel (defined in
+      a [draft TRD](https://github.com/tock/tock/blob/b2053517b4029a6b16360e34937a05138fdc07c1/doc/reference/trd-userspace-readable-allow-syscalls.md)).
+
+    - Introduction of a read-only state mechanism to convey information to
+      processes without explicit system calls
+      (https://github.com/tock/tock/pull/2381).
+
+    - Improvements to kernel code size (e.g.,
+      https://github.com/tock/tock/pull/2836,
+      https://github.com/tock/tock/pull/2849,
+      https://github.com/tock/tock/pull/2759,
+      https://github.com/tock/tock/pull/2823).
+
+ * New HILs
+
+    - `hasher`
+    - `public_key_crypto`
+
+ * New Platforms
+
+    - OpenTitan EarlGrey CW310
+    - Redboard Red-V B
+    - STM32F429I Discovery development board
+    - QEMU RISC-V 32-bit "virt" Platform
+
+ * Deprecated Platforms
+
+    - OpenTitan EarlGrey NexysVideo
+
+ * Known Issues
+
+    - This release was tagged despite several known bugs in non-tier-1 boards,
+      so as to avoid delaying the release. These include:
+
+      - Raspberry Pi Pico: process faults when running IPC examples:
+        https://github.com/tock/tock/issues/3183
+
+      - The cortex-m exception handler does not correctly handle all possible
+        exception entry cases. This is not known to currently manifest on any
+        examples, but could with unlucky timing:
+        https://github.com/tock/tock/issues/3109
+
+      - STM32F303 Discovery: `adc` app runs, but eventually hangs in the app
+        (seems to be caught in the exit loop, but not sure why it gets there)
+
+      - STM32F303 Discovery: kernel panics lead to only a partial printout of
+        the panic message before the board enters a reboot loop
+
+      - weact_f401ccu6: `gpio` example fails to generate interrupts on the
+        input pin. This board is likely to be deprecated soon anyway, as it is
+        no longer available for sale.
+
+
 New in 2.0
 ==========
 

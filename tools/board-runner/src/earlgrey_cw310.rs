@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use rexpect::errors::Error;
 use rexpect::spawn_stream;
 use serialport::prelude::*;
@@ -50,7 +54,7 @@ fn earlgrey_cw310_flash(
     p.exp_string("Processing frame #13, expecting #13")?;
     p.exp_string("Processing frame #67, expecting #67")?;
 
-    p.exp_string("Boot ROM initialisation has completed, jump into flash")?;
+    p.exp_string("Test ROM complete, jumping to flash!")?;
 
     Ok(p)
 }

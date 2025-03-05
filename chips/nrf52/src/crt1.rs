@@ -1,6 +1,9 @@
-use cortexm4::{
-    generic_isr, hard_fault_handler, initialize_ram_jump_to_main, nvic, scb, svc_handler,
-    systick_handler, unhandled_interrupt,
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
+use cortexm4f::{
+    initialize_ram_jump_to_main, nvic, scb, unhandled_interrupt, CortexM4F, CortexMVariant,
 };
 
 /*
@@ -33,7 +36,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     // NMI
     unhandled_interrupt,
     // Hard Fault
-    hard_fault_handler,
+    CortexM4F::HARD_FAULT_HANDLER,
     // Memory Management Fault
     unhandled_interrupt,
     // Bus Fault
@@ -49,7 +52,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     // Reserved
     unhandled_interrupt,
     // SVCall
-    svc_handler,
+    CortexM4F::SVC_HANDLER,
     // Reserved for Debug
     unhandled_interrupt,
     // Reserved
@@ -57,7 +60,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     // PendSv
     unhandled_interrupt,
     // SysTick
-    systick_handler,
+    CortexM4F::SYSTICK_HANDLER,
 ];
 
 #[cfg_attr(
@@ -66,7 +69,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
 )]
 // used Ensures that the symbol is kept until the final binary
 #[cfg_attr(all(target_arch = "arm", target_os = "none"), used)]
-pub static IRQS: [unsafe extern "C" fn(); 80] = [generic_isr; 80];
+pub static IRQS: [unsafe extern "C" fn(); 80] = [CortexM4F::GENERIC_ISR; 80];
 
 #[no_mangle]
 pub unsafe extern "C" fn init() {
@@ -143,7 +146,7 @@ pub unsafe extern "C" fn init() {
     // correctly for Tock. The bootloader _may_ set this for us, but it may not
     // so that any errors early in the Tock boot process trap back to the bootloader.
     // To be safe we unconditionally set the vector table.
-    scb::set_vector_table_offset(BASE_VECTORS.as_ptr() as *const ());
+    scb::set_vector_table_offset(BASE_VECTORS.as_ptr().cast::<()>());
 
     nvic::enable_all();
 }

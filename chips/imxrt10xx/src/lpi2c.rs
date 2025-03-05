@@ -1,3 +1,7 @@
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
 use core::cell::Cell;
 
 use kernel::debug;
@@ -438,10 +442,10 @@ pub struct Lpi2c<'a> {
     master_client: OptionalCell<&'a dyn hil::i2c::I2CHwMasterClient>,
 
     buffer: TakeCell<'static, [u8]>,
-    tx_position: Cell<u8>,
-    rx_position: Cell<u8>,
-    tx_len: Cell<u8>,
-    rx_len: Cell<u8>,
+    tx_position: Cell<usize>,
+    rx_position: Cell<usize>,
+    tx_len: Cell<usize>,
+    rx_len: Cell<usize>,
 
     slave_address: Cell<u8>,
 
@@ -463,13 +467,13 @@ enum Lpi2cStatus {
 }
 
 impl<'a> Lpi2c<'a> {
-    pub const fn new_lpi2c1(ccm: &'a ccm::Ccm) -> Self {
+    pub fn new_lpi2c1(ccm: &'a ccm::Ccm) -> Self {
         Lpi2c::new(
             LPI2C1_BASE,
             Lpi2cClock(ccm::PeripheralClock::ccgr2(ccm, ccm::HCLK2::LPI2C1)),
         )
     }
-    const fn new(base_addr: StaticRef<Lpi2cRegisters>, clock: Lpi2cClock<'a>) -> Self {
+    fn new(base_addr: StaticRef<Lpi2cRegisters>, clock: Lpi2cClock<'a>) -> Self {
         Self {
             registers: base_addr,
             clock,
@@ -535,7 +539,7 @@ impl<'a> Lpi2c<'a> {
     pub fn send_byte(&self) -> bool {
         if self.buffer.is_some() && self.tx_position.get() < self.tx_len.get() {
             self.buffer.map(|buf| {
-                let byte = buf[self.tx_position.get() as usize];
+                let byte = buf[self.tx_position.get()];
                 self.registers.mtdr.write(MTDR::DATA.val(byte as u32));
                 self.tx_position.set(self.tx_position.get() + 1);
             });
@@ -550,7 +554,7 @@ impl<'a> Lpi2c<'a> {
         let byte = self.registers.mrdr.read(MRDR::DATA) as u8;
         if self.buffer.is_some() && self.rx_position.get() < self.rx_len.get() {
             self.buffer.map(|buf| {
-                buf[self.rx_position.get() as usize] = byte;
+                buf[self.rx_position.get()] = byte;
                 self.rx_position.set(self.rx_position.get() + 1);
             });
             true
@@ -699,9 +703,9 @@ impl<'a> Lpi2c<'a> {
 
         // setting slave address
         self.registers.mier.modify(MIER::EPIE::CLEAR);
-        self.registers
-            .mtdr
-            .write(MTDR::CMD.val(100) + MTDR::DATA.val((self.slave_address.get() << 1 + 1) as u32));
+        self.registers.mtdr.write(
+            MTDR::CMD.val(100) + MTDR::DATA.val((self.slave_address.get() << (1 + 1)) as u32),
+        );
 
         self.registers.mcfgr1.modify(MCFGR1::PINCFG::CLEAR);
         self.registers
@@ -710,8 +714,8 @@ impl<'a> Lpi2c<'a> {
     }
 }
 
-impl i2c::I2CMaster for Lpi2c<'_> {
-    fn set_master_client(&self, master_client: &'static dyn I2CHwMasterClient) {
+impl<'a> i2c::I2CMaster<'a> for Lpi2c<'a> {
+    fn set_master_client(&self, master_client: &'a dyn I2CHwMasterClient) {
         self.master_client.replace(master_client);
     }
     fn enable(&self) {
@@ -726,8 +730,8 @@ impl i2c::I2CMaster for Lpi2c<'_> {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (i2c::Error, &'static mut [u8])> {
         if self.status.get() == Lpi2cStatus::Idle {
             self.reset();
@@ -748,7 +752,7 @@ impl i2c::I2CMaster for Lpi2c<'_> {
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (i2c::Error, &'static mut [u8])> {
         if self.status.get() == Lpi2cStatus::Idle {
             self.reset();
@@ -768,7 +772,7 @@ impl i2c::I2CMaster for Lpi2c<'_> {
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (i2c::Error, &'static mut [u8])> {
         if self.status.get() == Lpi2cStatus::Idle {
             self.reset();

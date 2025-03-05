@@ -1,13 +1,21 @@
-//! IO Master Driver (I2C)
+// Licensed under the Apache License, Version 2.0 or the MIT License.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+// Copyright Tock Contributors 2022.
+
+//! IO Master Driver (I2C and SPI)
 
 use core::cell::Cell;
 use kernel::hil;
+use kernel::hil::gpio::Configure;
 use kernel::hil::i2c;
-use kernel::utilities::cells::OptionalCell;
-use kernel::utilities::cells::TakeCell;
+use kernel::hil::spi::cs::ChipSelectPolar;
+use kernel::hil::spi::{ClockPhase, ClockPolarity, SpiMaster, SpiMasterClient};
+use kernel::utilities::cells::{MapCell, OptionalCell};
+use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::ErrorCode;
 
 const IOM0_BASE: StaticRef<IomRegisters> =
     unsafe { StaticRef::new(0x5000_4000 as *const IomRegisters) };
@@ -259,103 +267,169 @@ register_bitfields![u32,
     ]
 ];
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Operation {
+    None,
+    I2C,
+    SPI,
+}
+
 pub struct Iom<'a> {
     registers: StaticRef<IomRegisters>,
 
-    master_client: OptionalCell<&'a dyn hil::i2c::I2CHwMasterClient>,
+    i2c_master_client: OptionalCell<&'a dyn hil::i2c::I2CHwMasterClient>,
+    spi_master_client: OptionalCell<&'a dyn SpiMasterClient>,
 
-    buffer: TakeCell<'static, [u8]>,
+    buffer: MapCell<SubSliceMut<'static, u8>>,
+    spi_read_buffer: MapCell<SubSliceMut<'static, u8>>,
     write_len: Cell<usize>,
     write_index: Cell<usize>,
 
     read_len: Cell<usize>,
     read_index: Cell<usize>,
 
+    op: Cell<Operation>,
+    spi_phase: Cell<ClockPhase>,
+    spi_cs: OptionalCell<ChipSelectPolar<'a, crate::gpio::GpioPin<'a>>>,
     smbus: Cell<bool>,
 }
 
 impl<'a> Iom<'_> {
-    pub const fn new0() -> Iom<'a> {
+    pub fn new0() -> Iom<'a> {
         Iom {
             registers: IOM0_BASE,
-            master_client: OptionalCell::empty(),
-            buffer: TakeCell::empty(),
+            i2c_master_client: OptionalCell::empty(),
+            spi_master_client: OptionalCell::empty(),
+            buffer: MapCell::empty(),
+            spi_read_buffer: MapCell::empty(),
             write_len: Cell::new(0),
             write_index: Cell::new(0),
             read_len: Cell::new(0),
             read_index: Cell::new(0),
+            op: Cell::new(Operation::None),
+            spi_phase: Cell::new(ClockPhase::SampleLeading),
+            spi_cs: OptionalCell::empty(),
             smbus: Cell::new(false),
         }
     }
-    pub const fn new1() -> Iom<'a> {
+    pub fn new1() -> Iom<'a> {
         Iom {
             registers: IOM1_BASE,
-            master_client: OptionalCell::empty(),
-            buffer: TakeCell::empty(),
+            i2c_master_client: OptionalCell::empty(),
+            spi_master_client: OptionalCell::empty(),
+            buffer: MapCell::empty(),
+            spi_read_buffer: MapCell::empty(),
             write_len: Cell::new(0),
             write_index: Cell::new(0),
             read_len: Cell::new(0),
             read_index: Cell::new(0),
+            op: Cell::new(Operation::None),
+            spi_phase: Cell::new(ClockPhase::SampleLeading),
+            spi_cs: OptionalCell::empty(),
             smbus: Cell::new(false),
         }
     }
-    pub const fn new2() -> Iom<'a> {
+    pub fn new2() -> Iom<'a> {
         Iom {
             registers: IOM2_BASE,
-            master_client: OptionalCell::empty(),
-            buffer: TakeCell::empty(),
+            i2c_master_client: OptionalCell::empty(),
+            spi_master_client: OptionalCell::empty(),
+            buffer: MapCell::empty(),
+            spi_read_buffer: MapCell::empty(),
             write_len: Cell::new(0),
             write_index: Cell::new(0),
             read_len: Cell::new(0),
             read_index: Cell::new(0),
+            op: Cell::new(Operation::None),
+            spi_phase: Cell::new(ClockPhase::SampleLeading),
+            spi_cs: OptionalCell::empty(),
             smbus: Cell::new(false),
         }
     }
-    pub const fn new3() -> Iom<'a> {
+    pub fn new3() -> Iom<'a> {
         Iom {
             registers: IOM3_BASE,
-            master_client: OptionalCell::empty(),
-            buffer: TakeCell::empty(),
+            i2c_master_client: OptionalCell::empty(),
+            spi_master_client: OptionalCell::empty(),
+            buffer: MapCell::empty(),
+            spi_read_buffer: MapCell::empty(),
             write_len: Cell::new(0),
             write_index: Cell::new(0),
             read_len: Cell::new(0),
             read_index: Cell::new(0),
+            op: Cell::new(Operation::None),
+            spi_phase: Cell::new(ClockPhase::SampleLeading),
+            spi_cs: OptionalCell::empty(),
             smbus: Cell::new(false),
         }
     }
-    pub const fn new4() -> Iom<'a> {
+    pub fn new4() -> Iom<'a> {
         Iom {
             registers: IOM4_BASE,
-            master_client: OptionalCell::empty(),
-            buffer: TakeCell::empty(),
+            i2c_master_client: OptionalCell::empty(),
+            spi_master_client: OptionalCell::empty(),
+            buffer: MapCell::empty(),
+            spi_read_buffer: MapCell::empty(),
             write_len: Cell::new(0),
             write_index: Cell::new(0),
             read_len: Cell::new(0),
             read_index: Cell::new(0),
+            op: Cell::new(Operation::None),
+            spi_phase: Cell::new(ClockPhase::SampleLeading),
+            spi_cs: OptionalCell::empty(),
             smbus: Cell::new(false),
         }
     }
-    pub const fn new5() -> Iom<'a> {
+    pub fn new5() -> Iom<'a> {
         Iom {
             registers: IOM5_BASE,
-            master_client: OptionalCell::empty(),
-            buffer: TakeCell::empty(),
+            i2c_master_client: OptionalCell::empty(),
+            spi_master_client: OptionalCell::empty(),
+            buffer: MapCell::empty(),
+            spi_read_buffer: MapCell::empty(),
             write_len: Cell::new(0),
             write_index: Cell::new(0),
             read_len: Cell::new(0),
             read_index: Cell::new(0),
+            op: Cell::new(Operation::None),
+            spi_phase: Cell::new(ClockPhase::SampleLeading),
+            spi_cs: OptionalCell::empty(),
             smbus: Cell::new(false),
         }
     }
 
-    fn reset_fifo(&self) {
+    fn i2c_reset_fifo(&self) {
         let regs = self.registers;
 
+        // Set the value low to reset
         regs.fifoctrl.modify(FIFOCTRL::FIFORSTN::CLEAR);
+
+        // Wait a few cycles to ensure the reset completes
+        for _i in 0..30 {
+            cortexm4f::support::nop();
+        }
+
+        // Exit the reset state
         regs.fifoctrl.modify(FIFOCTRL::FIFORSTN::SET);
     }
 
-    fn write_data(&self) {
+    /// The IOM has a few erratas when used in FIFO mode (as we do here).
+    /// See: <https://ambiq.com/wp-content/uploads/2022/01/Apollo3-Blue-Errata-List.pdf>
+    ///
+    /// ERR009 means that we might get a THR interrupt incorrectly, it also
+    /// appears that the FIFOxSIZ fields are a little slow to update, so even
+    /// if we check the fields, they contain the wrong information.
+    ///
+    /// Adding a small delay here is enough to ensure the fifoptr values update
+    /// before the next iteration. This value is mostly arbitrary, but the
+    /// current value seems to work reliably.
+    fn iom_fifo_errata_delay(&self) {
+        for _i in 0..3000 {
+            cortexm4f::support::nop();
+        }
+    }
+
+    fn i2c_write_data(&self) {
         let regs = self.registers;
         let mut data_pushed = self.write_index.get();
         let len = self.write_len.get();
@@ -370,7 +444,7 @@ impl<'a> Iom<'_> {
                 let data_idx = i * 4;
 
                 if regs.fifoptr.read(FIFOPTR::FIFO0REM) <= 4 {
-                    self.write_index.set(data_pushed as usize);
+                    self.write_index.set(data_pushed);
                     break;
                 }
 
@@ -388,27 +462,27 @@ impl<'a> Iom<'_> {
             if len < 4 || data_pushed > (len - 4) {
                 // Check if we have any left over data
                 if len % 4 == 1 {
-                    let d = buf[len as usize - 1] as u32;
+                    let d = buf[len - 1] as u32;
 
                     regs.fifopush.set(d);
                 } else if len % 4 == 2 {
-                    let mut d = (buf[len as usize - 1] as u32) << 8;
-                    d |= (buf[len as usize - 2] as u32) << 0;
+                    let mut d = (buf[len - 1] as u32) << 8;
+                    d |= (buf[len - 2] as u32) << 0;
 
                     regs.fifopush.set(d);
                 } else if len % 4 == 3 {
-                    let mut d = (buf[len as usize - 1] as u32) << 16;
-                    d |= (buf[len as usize - 2] as u32) << 8;
-                    d |= (buf[len as usize - 3] as u32) << 0;
+                    let mut d = (buf[len - 1] as u32) << 16;
+                    d |= (buf[len - 2] as u32) << 8;
+                    d |= (buf[len - 3] as u32) << 0;
 
                     regs.fifopush.set(d);
                 }
-                self.write_index.set(len as usize);
+                self.write_index.set(len);
             }
         });
     }
 
-    fn read_data(&self) {
+    fn i2c_read_data(&self) {
         let regs = self.registers;
         let mut data_popped = self.read_index.get();
         let len = self.read_len.get();
@@ -422,8 +496,10 @@ impl<'a> Iom<'_> {
             for i in (data_popped / 4)..(len / 4) {
                 let data_idx = i * 4;
 
+                self.iom_fifo_errata_delay();
+
                 if regs.fifoptr.read(FIFOPTR::FIFO1SIZ) < 4 {
-                    self.read_index.set(data_popped as usize);
+                    self.read_index.set(data_popped);
                     break;
                 }
 
@@ -437,8 +513,10 @@ impl<'a> Iom<'_> {
                 data_popped = data_idx + 4;
             }
 
-            // Get an remaining data that isn't 4 bytes long
+            // Get remaining data that isn't 4 bytes long
             if len < 4 || data_popped > (len - 4) {
+                self.iom_fifo_errata_delay();
+
                 // Check if we have any left over data
                 if len % 4 == 1 {
                     let d = regs.fifopop.get().to_ne_bytes();
@@ -456,7 +534,7 @@ impl<'a> Iom<'_> {
                     buf[len - 2] = d[1];
                     buf[len - 1] = d[2];
                 }
-                self.read_index.set(len as usize);
+                self.read_index.set(len);
             }
         });
     }
@@ -467,46 +545,19 @@ impl<'a> Iom<'_> {
 
         // Clear interrrupts
         regs.intclr.set(0xFFFF_FFFF);
+        // Ensure interrupts remain enabled
+        regs.inten.set(0xFFFF_FFFF);
 
-        if irqs.is_set(INT::CMDCMP) || irqs.is_set(INT::THR) {
-            // Enable interrupts
-            regs.inten.set(0xFFFF_FFFF);
+        if irqs.is_set(INT::NAK) {
+            if self.op.get() == Operation::I2C {
+                // Disable interrupts
+                regs.inten.set(0x00);
+                self.i2c_reset_fifo();
 
-            if regs.fifothr.read(FIFOTHR::FIFOWTHR) > 0 {
-                let remaining = self.write_len.get() - self.write_index.get();
-
-                if remaining > 4 {
-                    regs.fifothr.write(
-                        FIFOTHR::FIFORTHR.val(0) + FIFOTHR::FIFOWTHR.val(remaining as u32 / 2),
-                    );
-                } else {
-                    regs.fifothr
-                        .write(FIFOTHR::FIFORTHR.val(0) + FIFOTHR::FIFOWTHR.val(1));
-                }
-
-                self.write_data();
-            } else if regs.fifothr.read(FIFOTHR::FIFORTHR) > 0 {
-                let remaining = self.read_len.get() - self.read_index.get();
-
-                if remaining > 4 {
-                    regs.fifothr.write(
-                        FIFOTHR::FIFORTHR.val(remaining as u32 / 2) + FIFOTHR::FIFOWTHR.val(0),
-                    );
-                } else {
-                    regs.fifothr
-                        .write(FIFOTHR::FIFORTHR.val(1) + FIFOTHR::FIFOWTHR.val(0));
-                }
-
-                self.read_data();
-            }
-        }
-
-        if irqs.is_set(INT::CMDCMP) {
-            if (self.read_len.get() > 0 && self.read_index.get() == self.read_len.get())
-                || (self.write_len.get() > 0 && self.write_index.get() == self.write_len.get())
-            {
-                self.master_client.map(|client| {
-                    client.command_complete(self.buffer.take().unwrap(), Ok(()));
+                self.i2c_master_client.map(|client| {
+                    self.buffer.take().map(|buffer| {
+                        client.command_complete(buffer.take(), Err(i2c::Error::DataNak));
+                    });
                 });
 
                 // Finished with SMBus
@@ -523,16 +574,279 @@ impl<'a> Iom<'_> {
 
                     self.smbus.set(false);
                 }
+            } else {
+                // Disable interrupts
+                regs.inten.set(0x00);
+
+                // Clear CS
+                self.spi_cs.map(|cs| cs.deactivate());
+
+                self.op.set(Operation::None);
+
+                self.spi_master_client.map(|client| {
+                    self.buffer.take().map(|buffer| {
+                        let read_buffer = self.spi_read_buffer.take();
+                        client.read_write_done(buffer, read_buffer, Err(ErrorCode::NOACK));
+                    });
+                });
+            }
+            return;
+        }
+
+        if self.op.get() == Operation::SPI {
+            // Read the incoming data
+            if let Some(mut buf) = self.spi_read_buffer.take() {
+                while self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) > 0 {
+                    self.iom_fifo_errata_delay();
+
+                    let d = self.registers.fifopop.get().to_ne_bytes();
+                    let data_idx = self.read_index.get();
+
+                    if let Some(b) = buf.as_slice().get_mut(data_idx + 0) {
+                        *b = d[0];
+                        self.read_index.set(data_idx + 1);
+                    }
+                    if let Some(b) = buf.as_slice().get_mut(data_idx + 1) {
+                        *b = d[1];
+                        self.read_index.set(data_idx + 2);
+                    }
+                    if let Some(b) = buf.as_slice().get_mut(data_idx + 2) {
+                        *b = d[2];
+                        self.read_index.set(data_idx + 3);
+                    }
+                    if let Some(b) = buf.as_slice().get_mut(data_idx + 3) {
+                        *b = d[3];
+                        self.read_index.set(data_idx + 4);
+                    }
+                }
+
+                self.spi_read_buffer.replace(buf);
+
+                if self.read_len.get() > self.read_index.get() {
+                    let remaining_bytes = (self.read_len.get() - self.read_index.get()).min(32);
+                    self.registers
+                        .fifothr
+                        .modify(FIFOTHR::FIFORTHR.val(remaining_bytes as u32));
+                } else {
+                    self.registers.fifothr.modify(FIFOTHR::FIFORTHR.val(0));
+                }
+            } else {
+                while self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) > 0 {
+                    self.iom_fifo_errata_delay();
+
+                    let _d = self.registers.fifopop.get().to_ne_bytes();
+                }
+
+                self.registers.fifothr.modify(FIFOTHR::FIFORTHR.val(0));
+            }
+
+            // Write more data out
+            if self.write_index.get() < self.write_len.get() {
+                if let Some(write_buffer) = self.buffer.take() {
+                    let mut transfered_bytes = 0;
+
+                    // While there is some free space in FIFO0 (writing to the SPI bus) and
+                    // at least 4 bytes free in FIFO1 (reading from the SPI bus to the
+                    // hardware FIFO) we write up to 24 bytes of data.
+                    //
+                    // The `> 4` really could be `>= 4` but > gives us a little wiggle room
+                    // as the hardware does seem a little slow at updating the FIFO size
+                    // registers.
+                    //
+                    // The 24 byte limit is along the same lines, of just making sure we
+                    // don't write too much data. I don't have a good answer of why it should
+                    // be 24, but that seems to work reliably from testing.
+                    //
+                    // There isn't a specific errata for this issue, but the official HAL
+                    // uses DMA so there aren't a lot of FIFO users for large transfers like
+                    // this.
+                    while self.registers.fifoptr.read(FIFOPTR::FIFO0REM) > 0
+                        && self.registers.fifoptr.read(FIFOPTR::FIFO1REM) > 4
+                        && self.write_index.get() < self.write_len.get()
+                        && transfered_bytes < 24
+                    {
+                        let idx = self.write_index.get();
+
+                        let chunk = write_buffer[idx..].chunks(4).next().unwrap_or(&[]);
+
+                        let data = u32::from_le_bytes([
+                            chunk.get(0).copied().unwrap_or(0),
+                            chunk.get(1).copied().unwrap_or(0),
+                            chunk.get(2).copied().unwrap_or(0),
+                            chunk.get(3).copied().unwrap_or(0),
+                        ]);
+
+                        self.registers.fifopush.set(data);
+                        self.write_index.set(idx + 4);
+                        transfered_bytes += 4;
+                    }
+
+                    self.buffer.replace(write_buffer);
+                }
+
+                let remaining_bytes = (self.write_len.get() - self.write_index.get()).min(32);
+                self.registers
+                    .fifothr
+                    .modify(FIFOTHR::FIFOWTHR.val(remaining_bytes as u32));
+            } else {
+                self.registers.fifothr.modify(FIFOTHR::FIFOWTHR.val(0));
+            }
+
+            if (self.write_len.get() > 0
+                && self.write_index.get() >= self.write_len.get()
+                && self.read_len.get() > 0
+                && self.read_index.get() >= self.read_len.get())
+                || irqs.is_set(INT::CMDCMP)
+            {
+                // Disable interrupts
+                regs.inten.set(0x00);
+
+                // Clear CS
+                self.spi_cs.map(|cs| cs.deactivate());
+
+                self.op.set(Operation::None);
+
+                self.spi_master_client.map(|client| {
+                    self.buffer.take().map(|buffer| {
+                        let read_buffer = self.spi_read_buffer.take();
+                        client.read_write_done(buffer, read_buffer, Ok(self.write_len.get()));
+                    });
+                });
+            }
+
+            return;
+        }
+
+        if irqs.is_set(INT::CMDCMP) || irqs.is_set(INT::THR) {
+            if self.op.get() == Operation::I2C {
+                if irqs.is_set(INT::THR) {
+                    if regs.fifothr.read(FIFOTHR::FIFOWTHR) > 0 {
+                        let remaining = self.write_len.get() - self.write_index.get();
+
+                        if remaining > 4 {
+                            regs.fifothr.write(
+                                FIFOTHR::FIFORTHR.val(0)
+                                    + FIFOTHR::FIFOWTHR.val(remaining as u32 / 2),
+                            );
+                        } else {
+                            regs.fifothr
+                                .write(FIFOTHR::FIFORTHR.val(0) + FIFOTHR::FIFOWTHR.val(1));
+                        }
+
+                        self.i2c_write_data();
+                    } else if regs.fifothr.read(FIFOTHR::FIFORTHR) > 0 {
+                        let remaining = self.read_len.get() - self.read_index.get();
+
+                        if remaining > 4 {
+                            regs.fifothr.write(
+                                FIFOTHR::FIFORTHR.val(remaining as u32 / 2)
+                                    + FIFOTHR::FIFOWTHR.val(0),
+                            );
+                        } else {
+                            regs.fifothr
+                                .write(FIFOTHR::FIFORTHR.val(1) + FIFOTHR::FIFOWTHR.val(0));
+                        }
+
+                        self.i2c_read_data();
+                    }
+                }
+
+                if irqs.is_set(INT::CMDCMP) {
+                    if (self.read_len.get() > 0 && self.read_index.get() == self.read_len.get())
+                        || (self.write_len.get() > 0
+                            && self.write_index.get() == self.write_len.get())
+                    {
+                        // Disable interrupts
+                        regs.inten.set(0x00);
+                        self.i2c_reset_fifo();
+
+                        self.i2c_master_client.map(|client| {
+                            self.buffer.take().map(|buffer| {
+                                client.command_complete(buffer.take(), Ok(()));
+                            });
+                        });
+
+                        // Finished with SMBus
+                        if self.smbus.get() {
+                            // Setup 400kHz
+                            regs.clkcfg.write(
+                                CLKCFG::TOTPER.val(0x1D)
+                                    + CLKCFG::LOWPER.val(0xE)
+                                    + CLKCFG::DIVEN.val(1)
+                                    + CLKCFG::DIV3.val(0)
+                                    + CLKCFG::FSEL.val(2)
+                                    + CLKCFG::IOCLKEN::SET,
+                            );
+
+                            self.smbus.set(false);
+                        }
+                    }
+                }
+            } else {
+                self.buffer.take().map(|write_buffer| {
+                    let offset = self.write_index.get();
+                    if self.write_len.get() > offset {
+                        let burst_len = (self.write_len.get() - offset)
+                            .min(self.registers.fifoptr.read(FIFOPTR::FIFO0REM) as usize);
+
+                        // Start the transfer
+                        self.registers.cmd.write(
+                            CMD::TSIZE.val(burst_len as u32)
+                                + CMD::CMDSEL.val(1)
+                                + CMD::CONT::CLEAR
+                                + CMD::CMD::WRITE
+                                + CMD::OFFSETCNT.val(0_u32)
+                                + CMD::OFFSETLO.val(0),
+                        );
+
+                        while self.registers.fifoptr.read(FIFOPTR::FIFO0REM) > 4
+                            && self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) < 32
+                            && self.write_index.get() < (((offset + burst_len) / 4) * 4)
+                            && self.write_len.get() - self.write_index.get() > 4
+                        {
+                            let idx = self.write_index.get();
+                            let data = u32::from_le_bytes(
+                                write_buffer[idx..(idx + 4)].try_into().unwrap_or([0; 4]),
+                            );
+
+                            self.registers.fifopush.set(data);
+                            self.write_index.set(idx + 4);
+                        }
+
+                        // Get remaining data that isn't 4 bytes long
+                        if self.write_len.get() - self.write_index.get() < 4
+                            && self.write_index.get() < (offset + burst_len)
+                        {
+                            let len = self.write_len.get() - self.write_index.get();
+                            let mut buf = [0; 4];
+                            // Check if we have any left over data
+                            if len % 4 == 1 {
+                                buf[len - 1] = write_buffer[self.write_index.get() + 0];
+                            } else if len % 4 == 2 {
+                                buf[len - 2] = write_buffer[self.write_index.get() + 0];
+                                buf[len - 1] = write_buffer[self.write_index.get() + 1];
+                            } else if len % 4 == 3 {
+                                buf[len - 3] = write_buffer[self.write_index.get() + 0];
+                                buf[len - 2] = write_buffer[self.write_index.get() + 1];
+                                buf[len - 1] = write_buffer[self.write_index.get() + 2];
+                            }
+                            self.registers.fifopush.set(u32::from_le_bytes(buf));
+                            self.write_index.set(self.write_index.get() + len);
+                        }
+                    }
+
+                    self.buffer.replace(write_buffer);
+                });
             }
         }
     }
 
-    fn tx_rx(
+    fn i2c_tx_rx(
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (i2c::Error, &'static mut [u8])> {
         let regs = self.registers;
         let mut offsetlo = 0;
@@ -555,7 +869,7 @@ impl<'a> Iom<'_> {
                 .write(FIFOTHR::FIFORTHR.val(1) + FIFOTHR::FIFOWTHR.val(0));
         }
 
-        self.reset_fifo();
+        self.i2c_reset_fifo();
 
         if write_len > 0 {
             offsetlo = data[0] as u32;
@@ -571,9 +885,9 @@ impl<'a> Iom<'_> {
             Err((i2c::Error::NotSupported, data))
         } else {
             // Save all the data and offsets we still need to send
-            self.buffer.replace(data);
-            self.write_len.set(write_len as usize);
-            self.read_len.set(read_len as usize);
+            self.buffer.replace(data.into());
+            self.write_len.set(write_len);
+            self.read_len.set(read_len);
             self.write_index.set(0);
             self.read_index.set(0);
             // Clear and enable interrupts
@@ -588,16 +902,15 @@ impl<'a> Iom<'_> {
                     + CMD::OFFSETLO.val(offsetlo),
             );
 
-            self.read_data();
             Ok(())
         }
     }
 
-    fn tx(
+    fn i2c_tx(
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (i2c::Error, &'static mut [u8])> {
         let regs = self.registers;
 
@@ -619,15 +932,15 @@ impl<'a> Iom<'_> {
                 .write(FIFOTHR::FIFORTHR.val(0) + FIFOTHR::FIFOWTHR.val(1));
         }
 
-        self.reset_fifo();
+        self.i2c_reset_fifo();
 
         // Save all the data and offsets we still need to send
-        self.buffer.replace(data);
-        self.write_len.set(len as usize);
+        self.buffer.replace(data.into());
+        self.write_len.set(len);
         self.read_len.set(0);
         self.write_index.set(0);
 
-        self.write_data();
+        self.i2c_write_data();
 
         // Clear and enable interrupts
         regs.intclr.set(0xFFFF_FFFF);
@@ -639,11 +952,11 @@ impl<'a> Iom<'_> {
         Ok(())
     }
 
-    fn rx(
+    fn i2c_rx(
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (i2c::Error, &'static mut [u8])> {
         let regs = self.registers;
 
@@ -665,7 +978,7 @@ impl<'a> Iom<'_> {
                 .write(FIFOTHR::FIFORTHR.val(1) + FIFOTHR::FIFOWTHR.val(0));
         }
 
-        self.reset_fifo();
+        self.i2c_reset_fifo();
 
         // Clear and enable interrupts
         regs.intclr.set(0xFFFF_FFFF);
@@ -676,24 +989,26 @@ impl<'a> Iom<'_> {
             .write(CMD::TSIZE.val(len as u32) + CMD::CMD::READ + CMD::CONT::CLEAR);
 
         // Save all the data and offsets we still need to send
-        self.buffer.replace(buffer);
-        self.read_len.set(len as usize);
+        self.buffer.replace(buffer.into());
+        self.read_len.set(len);
         self.write_len.set(0);
         self.read_index.set(0);
 
-        self.read_data();
+        self.i2c_read_data();
 
         Ok(())
     }
 }
 
-impl<'a> hil::i2c::I2CMaster for Iom<'a> {
-    fn set_master_client(&self, master_client: &'a dyn i2c::I2CHwMasterClient) {
-        self.master_client.set(master_client);
+impl<'a> hil::i2c::I2CMaster<'a> for Iom<'a> {
+    fn set_master_client(&self, i2c_master_client: &'a dyn i2c::I2CHwMasterClient) {
+        self.i2c_master_client.set(i2c_master_client);
     }
 
     fn enable(&self) {
         let regs = self.registers;
+
+        self.op.set(Operation::I2C);
 
         // Setup the I2C
         regs.mi2ccfg.write(
@@ -727,47 +1042,73 @@ impl<'a> hil::i2c::I2CMaster for Iom<'a> {
     fn disable(&self) {
         let regs = self.registers;
 
-        regs.submodctrl.write(SUBMODCTRL::SMOD1EN::CLEAR);
+        if self.op.get() == Operation::I2C {
+            regs.submodctrl.write(SUBMODCTRL::SMOD1EN::CLEAR);
+
+            self.op.set(Operation::None);
+        }
     }
 
     fn write_read(
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
-        self.tx_rx(addr, data, write_len, read_len)
+        if self.op.get() != Operation::I2C {
+            return Err((hil::i2c::Error::Busy, data));
+        }
+        if data.len() < write_len {
+            return Err((hil::i2c::Error::Overrun, data));
+        }
+        self.i2c_tx_rx(addr, data, write_len, read_len)
     }
 
     fn write(
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
-        self.tx(addr, data, len)
+        if self.op.get() != Operation::I2C {
+            return Err((hil::i2c::Error::Busy, data));
+        }
+        if data.len() < len {
+            return Err((hil::i2c::Error::Overrun, data));
+        }
+        self.i2c_tx(addr, data, len)
     }
 
     fn read(
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
-        self.rx(addr, buffer, len)
+        if self.op.get() != Operation::I2C {
+            return Err((hil::i2c::Error::Busy, buffer));
+        }
+        if buffer.len() < len {
+            return Err((hil::i2c::Error::Overrun, buffer));
+        }
+        self.i2c_rx(addr, buffer, len)
     }
 }
 
-impl<'a> hil::i2c::SMBusMaster for Iom<'a> {
+impl<'a> hil::i2c::SMBusMaster<'a> for Iom<'a> {
     fn smbus_write_read(
         &self,
         addr: u8,
         data: &'static mut [u8],
-        write_len: u8,
-        read_len: u8,
+        write_len: usize,
+        read_len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         let regs = self.registers;
+
+        if self.op.get() != Operation::I2C {
+            return Err((hil::i2c::Error::Busy, data));
+        }
 
         // Setup 100kHz
         regs.clkcfg.write(
@@ -781,16 +1122,20 @@ impl<'a> hil::i2c::SMBusMaster for Iom<'a> {
 
         self.smbus.set(true);
 
-        self.tx_rx(addr, data, write_len, read_len)
+        self.i2c_tx_rx(addr, data, write_len, read_len)
     }
 
     fn smbus_write(
         &self,
         addr: u8,
         data: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         let regs = self.registers;
+
+        if self.op.get() != Operation::I2C {
+            return Err((hil::i2c::Error::Busy, data));
+        }
 
         // Setup 100kHz
         regs.clkcfg.write(
@@ -804,16 +1149,20 @@ impl<'a> hil::i2c::SMBusMaster for Iom<'a> {
 
         self.smbus.set(true);
 
-        self.tx(addr, data, len)
+        self.i2c_tx(addr, data, len)
     }
 
     fn smbus_read(
         &self,
         addr: u8,
         buffer: &'static mut [u8],
-        len: u8,
+        len: usize,
     ) -> Result<(), (hil::i2c::Error, &'static mut [u8])> {
         let regs = self.registers;
+
+        if self.op.get() != Operation::I2C {
+            return Err((hil::i2c::Error::Busy, buffer));
+        }
 
         // Setup 100kHz
         regs.clkcfg.write(
@@ -827,6 +1176,425 @@ impl<'a> hil::i2c::SMBusMaster for Iom<'a> {
 
         self.smbus.set(true);
 
-        self.rx(addr, buffer, len)
+        self.i2c_rx(addr, buffer, len)
+    }
+}
+
+impl<'a> SpiMaster<'a> for Iom<'a> {
+    type ChipSelect = ChipSelectPolar<'a, crate::gpio::GpioPin<'a>>;
+
+    fn init(&self) -> Result<(), ErrorCode> {
+        self.op.set(Operation::SPI);
+
+        self.registers.mspicfg.write(
+            MSPICFG::FULLDUP::SET
+                + MSPICFG::WTFC::CLEAR
+                + MSPICFG::RDFC::CLEAR
+                + MSPICFG::MOSIINV::CLEAR
+                + MSPICFG::WTFCIRQ::CLEAR
+                + MSPICFG::WTFCPOL::CLEAR
+                + MSPICFG::RDFCPOL::CLEAR
+                + MSPICFG::SPILSB::CLEAR
+                + MSPICFG::DINDLY::CLEAR
+                + MSPICFG::DOUTDLY::CLEAR
+                + MSPICFG::MSPIRST::CLEAR,
+        );
+
+        // Enable SPI
+        self.registers
+            .submodctrl
+            .write(SUBMODCTRL::SMOD1EN::CLEAR + SUBMODCTRL::SMOD0EN::SET);
+
+        self.registers.dmatrigen.write(DMATRIGEN::DTHREN::SET);
+
+        Ok(())
+    }
+
+    fn set_client(&self, client: &'a dyn SpiMasterClient) {
+        self.spi_master_client.set(client);
+    }
+
+    fn is_busy(&self) -> bool {
+        self.op.get() != Operation::None
+    }
+
+    fn read_write_bytes(
+        &self,
+        write_buffer: SubSliceMut<'static, u8>,
+        read_buffer: Option<SubSliceMut<'static, u8>>,
+    ) -> Result<
+        (),
+        (
+            ErrorCode,
+            SubSliceMut<'static, u8>,
+            Option<SubSliceMut<'static, u8>>,
+        ),
+    > {
+        let (write_len, read_len) = if let Some(rb) = read_buffer.as_ref() {
+            let min = write_buffer.len().min(rb.len());
+            (min, min)
+        } else {
+            (write_buffer.len(), 0)
+        };
+
+        // Disable DMA as we don't support it
+        self.registers.dmacfg.write(DMACFG::DMAEN::CLEAR);
+
+        // Set the DCX
+        self.registers.dcx.set(0);
+
+        self.write_index.set(0);
+        self.read_index.set(0);
+
+        // Clear interrupts
+        self.registers.intclr.set(0xFFFF_FFFF);
+
+        // Trigger CS
+        self.spi_cs.map(|cs| cs.activate());
+
+        // Start the transfer
+        self.registers.cmd.write(
+            CMD::TSIZE.val(write_len as u32)
+                + CMD::CMDSEL.val(1)
+                + CMD::CONT::CLEAR
+                + CMD::CMD::WRITE
+                + CMD::OFFSETCNT.val(0_u32)
+                + CMD::OFFSETLO.val(0),
+        );
+
+        if let Some(buf) = read_buffer {
+            self.spi_read_buffer.replace(buf);
+        }
+
+        while self.registers.cmdstat.read(CMDSTAT::CMDSTAT) == 0x02 {}
+
+        let mut transfered_bytes = 0;
+
+        // While there is some free space in FIFO0 (writing to the SPI bus) and
+        // at least 4 bytes free in FIFO1 (reading from the SPI bus to the
+        // hardware FIFO) we write up to 24 bytes of data.
+        //
+        // The `> 4` really could be `>= 4` but > gives us a little wiggle room
+        // as the hardware does seem a little slow at updating the FIFO size
+        // registers.
+        //
+        // The 24 byte limit is along the same lines, of just making sure we
+        // don't write too much data. I don't have a good answer of why it should
+        // be 24, but that seems to work reliably from testing.
+        //
+        // There isn't a specific errata for this issue, but the official HAL
+        // uses DMA so there aren't a lot of FIFO users for large transfers like
+        // this.
+        while self.registers.fifoptr.read(FIFOPTR::FIFO0REM) > 0
+            && self.registers.fifoptr.read(FIFOPTR::FIFO1REM) > 4
+            && self.write_index.get() < write_len
+            && transfered_bytes < 24
+        {
+            let idx = self.write_index.get();
+
+            // Caution: This must handle "bytes remaining % 4 != 0" correctly.
+            let chunk = write_buffer[idx..].chunks(4).next().unwrap_or(&[]);
+
+            let data = u32::from_le_bytes([
+                chunk.get(0).copied().unwrap_or(0),
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+                chunk.get(3).copied().unwrap_or(0),
+            ]);
+
+            self.iom_fifo_errata_delay();
+
+            self.registers.fifopush.set(data);
+            self.write_index.set(idx + 4);
+            transfered_bytes += 4;
+
+            if let Some(mut buf) = self.spi_read_buffer.take() {
+                if self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) > 0
+                    && self.read_index.get() < read_len
+                {
+                    let d = self.registers.fifopop.get().to_ne_bytes();
+
+                    let data_idx = self.read_index.get();
+
+                    buf[data_idx + 0] = d[0];
+                    buf[data_idx + 1] = d[1];
+                    buf[data_idx + 2] = d[2];
+                    buf[data_idx + 3] = d[3];
+
+                    self.read_index.set(data_idx + 4);
+                }
+
+                self.spi_read_buffer.replace(buf);
+            } else {
+                if self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) > 0 {
+                    let _d = self.registers.fifopop.get();
+                }
+            }
+        }
+
+        // Save all the data and offsets we still need to send
+        self.buffer.replace(write_buffer);
+        self.write_len.set(write_len);
+        self.read_len.set(read_len);
+        self.op.set(Operation::SPI);
+
+        if read_len > self.read_index.get() {
+            let remaining_bytes = (read_len - self.read_index.get()).min(32);
+            self.registers
+                .fifothr
+                .modify(FIFOTHR::FIFORTHR.val(remaining_bytes as u32));
+        } else {
+            self.registers.fifothr.modify(FIFOTHR::FIFORTHR.val(0));
+        }
+
+        if write_len > self.write_index.get() {
+            let remaining_bytes = (self.write_len.get() - self.write_index.get()).min(32);
+
+            self.registers
+                .fifothr
+                .modify(FIFOTHR::FIFOWTHR.val(remaining_bytes as u32));
+        } else {
+            self.registers.fifothr.modify(FIFOTHR::FIFOWTHR.val(0));
+        }
+
+        // Enable interrupts
+        self.registers.inten.set(0xFFFF_FFFF);
+
+        Ok(())
+    }
+
+    fn write_byte(&self, val: u8) -> Result<(), ErrorCode> {
+        let burst_len = 1;
+
+        // Disable DMA as we don't support it
+        self.registers.dmacfg.write(DMACFG::DMAEN::CLEAR);
+
+        // Set the DCX
+        self.registers.dcx.set(0);
+
+        // Clear interrupts
+        self.registers.intclr.set(0xFFFF_FFFF);
+
+        // Trigger CS
+        self.spi_cs.map(|cs| cs.activate());
+
+        // Start the transfer
+        self.registers.cmd.write(
+            CMD::TSIZE.val(burst_len as u32)
+                + CMD::CMDSEL.val(1)
+                + CMD::CONT::CLEAR
+                + CMD::CMD::WRITE
+                + CMD::OFFSETCNT.val(0_u32)
+                + CMD::OFFSETLO.val(0),
+        );
+
+        self.registers.fifopush.set(val as u32);
+
+        self.spi_cs.map(|cs| cs.deactivate());
+
+        Ok(())
+    }
+
+    fn read_byte(&self) -> Result<u8, ErrorCode> {
+        let burst_len = 1;
+
+        // Disable DMA as we don't support it
+        self.registers.dmacfg.write(DMACFG::DMAEN::CLEAR);
+
+        // Set the DCX
+        self.registers.dcx.set(0);
+
+        // Clear interrupts
+        self.registers.intclr.set(0xFFFF_FFFF);
+
+        // Trigger CS
+        self.spi_cs.map(|cs| cs.activate());
+
+        // Start the transfer
+        self.registers.cmd.write(
+            CMD::TSIZE.val(burst_len as u32)
+                + CMD::CMDSEL.val(1)
+                + CMD::CONT::CLEAR
+                + CMD::CMD::READ
+                + CMD::OFFSETCNT.val(0_u32)
+                + CMD::OFFSETLO.val(0),
+        );
+
+        if self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) > 0 {
+            let d = self.registers.fifopop.get().to_ne_bytes();
+
+            self.spi_cs.map(|cs| cs.deactivate());
+            return Ok(d[0]);
+        }
+
+        self.spi_cs.map(|cs| cs.deactivate());
+
+        Err(ErrorCode::FAIL)
+    }
+
+    fn read_write_byte(&self, val: u8) -> Result<u8, ErrorCode> {
+        let burst_len = 1;
+
+        // Disable DMA as we don't support it
+        self.registers.dmacfg.write(DMACFG::DMAEN::CLEAR);
+
+        // Set the DCX
+        self.registers.dcx.set(0);
+
+        // Clear interrupts
+        self.registers.intclr.set(0xFFFF_FFFF);
+
+        // Trigger CS
+        self.spi_cs.map(|cs| cs.activate());
+
+        // Start the transfer
+        self.registers.cmd.write(
+            CMD::TSIZE.val(burst_len as u32)
+                + CMD::CMDSEL.val(1)
+                + CMD::CONT::CLEAR
+                + CMD::CMD::WRITE
+                + CMD::OFFSETCNT.val(0_u32)
+                + CMD::OFFSETLO.val(0),
+        );
+
+        self.registers.fifopush.set(val as u32);
+
+        if self.registers.fifoptr.read(FIFOPTR::FIFO1SIZ) > 0 {
+            let d = self.registers.fifopop.get().to_ne_bytes();
+
+            self.spi_cs.map(|cs| cs.deactivate());
+            return Ok(d[0]);
+        }
+
+        self.spi_cs.map(|cs| cs.deactivate());
+
+        Err(ErrorCode::FAIL)
+    }
+
+    fn specify_chip_select(&self, cs: Self::ChipSelect) -> Result<(), ErrorCode> {
+        cs.pin.make_output();
+        cs.deactivate();
+        self.spi_cs.set(cs);
+
+        Ok(())
+    }
+
+    fn set_rate(&self, rate: u32) -> Result<u32, ErrorCode> {
+        if self.op.get() != Operation::SPI && self.op.get() != Operation::None {
+            return Err(ErrorCode::BUSY);
+        }
+
+        let div: u32 = 48000000 / rate; // TODO: Change to `48000000_u32.div_ceil(rate)` when api out of nightly
+        let n = div.trailing_zeros().max(6);
+
+        let div3 = u32::from(
+            (rate < (48000000 / 16384))
+                || ((rate >= (48000000 / 3)) && (rate <= ((48000000 / 2) - 1))),
+        );
+        let denom = (1 << n) * (1 + (div3 * 2));
+        let tot_per = if div % denom > 0 {
+            (div / denom) + 1
+        } else {
+            div / denom
+        };
+        let v1 = 31 - tot_per.leading_zeros();
+        let fsel = if v1 > 7 { v1 + n - 6 } else { n + 1 };
+
+        if fsel > 7 {
+            return Err(ErrorCode::NOSUPPORT);
+        }
+
+        let diven = u32::from((rate >= (48000000 / 4)) || ((1 << (fsel - 1)) == div));
+        let low_per = if self.spi_phase.get() == ClockPhase::SampleLeading {
+            (tot_per - 1) / 2
+        } else {
+            (tot_per - 2) / 2
+        };
+
+        self.registers.clkcfg.write(
+            CLKCFG::TOTPER.val(tot_per - 1)
+                + CLKCFG::LOWPER.val(low_per)
+                + CLKCFG::DIVEN.val(diven)
+                + CLKCFG::DIV3.val(div3)
+                + CLKCFG::FSEL.val(fsel)
+                + CLKCFG::IOCLKEN::SET,
+        );
+
+        Ok(self.get_rate())
+    }
+
+    fn get_rate(&self) -> u32 {
+        let fsel = self.registers.clkcfg.read(CLKCFG::FSEL);
+        let div3 = self.registers.clkcfg.read(CLKCFG::DIV3);
+        let diven = self.registers.clkcfg.read(CLKCFG::DIVEN);
+        let tot_per = self.registers.clkcfg.read(CLKCFG::TOTPER) + 1;
+
+        let denom_final = (1 << (fsel - 1)) * (1 + div3 * 2) * (1 + diven * (tot_per));
+
+        if ((48000000) % denom_final) > (denom_final / 2) {
+            (48000000 / denom_final) + 1
+        } else {
+            48000000 / denom_final
+        }
+    }
+
+    fn set_polarity(&self, polarity: ClockPolarity) -> Result<(), ErrorCode> {
+        if self.op.get() != Operation::SPI && self.op.get() != Operation::None {
+            return Err(ErrorCode::BUSY);
+        }
+
+        if polarity == ClockPolarity::IdleLow {
+            self.registers.mspicfg.modify(MSPICFG::SPOL::CLEAR);
+        } else {
+            self.registers.mspicfg.modify(MSPICFG::SPOL::SET);
+        }
+
+        Ok(())
+    }
+
+    fn get_polarity(&self) -> ClockPolarity {
+        if self.registers.mspicfg.is_set(MSPICFG::SPOL) {
+            ClockPolarity::IdleHigh
+        } else {
+            ClockPolarity::IdleLow
+        }
+    }
+
+    fn set_phase(&self, phase: ClockPhase) -> Result<(), ErrorCode> {
+        if self.op.get() != Operation::SPI && self.op.get() != Operation::None {
+            return Err(ErrorCode::BUSY);
+        }
+
+        let low_per = if self.spi_phase.get() == ClockPhase::SampleLeading {
+            (self.registers.clkcfg.read(CLKCFG::LOWPER) * 2) + 1
+        } else {
+            (self.registers.clkcfg.read(CLKCFG::LOWPER) * 2) + 2
+        };
+
+        if phase == ClockPhase::SampleLeading {
+            self.registers
+                .clkcfg
+                .modify(CLKCFG::LOWPER.val((low_per - 1) / 2));
+        } else {
+            self.registers
+                .clkcfg
+                .modify(CLKCFG::LOWPER.val((low_per - 2) / 2));
+        }
+
+        self.spi_phase.set(phase);
+
+        Ok(())
+    }
+
+    fn get_phase(&self) -> ClockPhase {
+        self.spi_phase.get()
+    }
+
+    fn hold_low(&self) {
+        self.spi_cs.map(|cs| cs.activate());
+    }
+
+    fn release_low(&self) {
+        self.spi_cs.map(|cs| cs.deactivate());
     }
 }

@@ -1,7 +1,7 @@
 Arduino Nano RP2040 Connect
 ===========================
 
-<img src="https://store-cdn.arduino.cc/uni/catalog/product/cache/1/image/520x330/604a3538c15e081937dbfbd20aa60aad/a/b/abx00053_00.default.jpg" width="35%">
+<img src="https://store-usa.arduino.cc/cdn/shop/products/ABX00052_01.iso_1000x750.jpg?v=1629816097" width="35%">
 
 The [Arduino Nano RP2040 Connect](https://docs.arduino.cc/hardware/nano-rp2040-connect) is an Arduino Nano
 board built using the Raspberry Pi Foundation's RP2040 chip.
@@ -10,22 +10,15 @@ board built using the Raspberry Pi Foundation's RP2040 chip.
 
 First, follow the [Tock Getting Started guide](../../doc/Getting_Started.md)
 
-## Installing elf2uf2
+## Installing elf2uf2-rs
 
 The Nano RP2040 uses UF2 files for flashing. Tock compiles to an ELF file.
-The `elf2uf2` utility is needed to transform the Tock ELF file into an UF2 file.
+The `elf2uf2-rs` utility is needed to transform the Tock ELF file into an UF2 file.
 
 To install `elf2uf2`, run the commands:
 
 ```bash
-$ git clone https://github.com/raspberrypi/pico-sdk
-$ cd pico-sdk
-$ cd tools/elf2uf2
-$ mkdir build
-$ cd build
-$ cmake ..
-$ make
-$ sudo cp elf2uf2 /usr/local/bin
+$ cargo install elf2uf2-rs
 ```
 
 ## Flashing the kernel
@@ -35,14 +28,14 @@ The Arduino Nano RP2040 Connect can be programmed using its bootloader, which re
 ### Enter BOOTSEL mode
 
 To flash the Nano RP2040, it needs to be put into BOOTSEL mode. This will mount
-a flash drive that allows one to copy a UF2 file. While the offical 
-documentation states that bouble pressing the on-board button enter this mode,
+a flash drive that allows one to copy a UF2 file. While the official
+documentation states that double pressing the on-board button enter this mode,
 this seems to work only while running Arduino's original software.
 
 If double tapping the button does not enter BOOTSEL mode (the flash drive is not mounted),
 the device can be [forced into BOOTSEL mode using a jumper wire](https://docs.arduino.cc/tutorials/nano-rp2040-connect/rp2040-01-technical-reference#forcing-bootloader).
 
-1. Disconenct the board from USB
+1. Disconnect the board from USB
 2. Connect the GND pin with the REC pin
 3. Connect the board to USB
 4. Wait for the flash drive to mount
